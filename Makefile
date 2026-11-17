@@ -6,7 +6,7 @@ build:
 	cargo build --release
 
 test:
-	cargo test
+	cargo test --workspace
 
 clippy:
 	cargo clippy --all-targets -- -D warnings
@@ -24,6 +24,7 @@ check:
 	cargo run -q -- check examples/conflicts/model.dg
 	cargo run -q -- check examples/refute/model.dg
 	cargo run -q -- port examples/port/model.dg --to b2 > /dev/null
+	cargo run -q -p deg-adapter -- check adapter/examples/synthetic/model.dg
 
 fixtures:
 	python3 tools/make_fixtures.py
