@@ -10,10 +10,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// A minimal PE32 image:
-/// * `.text`  VA 0x1000, raw offset 0x200, 0x200 bytes (NOPs, executable);
-/// * `.rdata` VA 0x2000, raw offset 0x400, 0x200 bytes of raw data of which
-///   0x100 are mapped; the first five bytes are `41 42 43 44 45`.
+/// A minimal PE32 image (image base 0x400000):
+/// * `.text`  RVA 0x1000 → VA 0x401000, raw offset 0x200, 0x200 bytes
+///   (NOPs, executable);
+/// * `.rdata` RVA 0x2000 → VA 0x402000, raw offset 0x400, 0x200 bytes of raw
+///   data of which 0x100 are mapped; the first five bytes are `41 42 43 44
+///   45`.
 fn synthetic_pe32() -> Vec<u8> {
     let mut bytes = vec![0u8; 0x600];
     bytes[0] = b'M';
@@ -95,12 +97,12 @@ fn pe_build_scans_rdata_and_reads_rdata_bytes() {
         sha
     );
     // No `text:` override and no `load:`: everything is resolved through the
-    // PE section table.
+    // PE section table, addressed by image-base virtual address.
     let model = model_with(
         &build,
         r#"
         ev e_scan := scan(pe1, ".rdata", "41 42 43 44 45");
-        ev e_bytes := bytes(pe1, at: 0x2000, expect: "4142434445");
+        ev e_bytes := bytes(pe1, at: 0x402000, expect: "4142434445");
         "#,
     );
     let model_path = tmp_dir().join("pe-check.dg");
@@ -119,6 +121,18 @@ fn pe_build_scans_rdata_and_reads_rdata_bytes() {
         .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("e_scan"))
         .unwrap();
     assert_eq!(scan.get("kind").and_then(|v| v.as_str()), Some("scan"));
+    // The hit is reported as an image-base virtual address.
+    let hit0 = scan
+        .get("details")
+        .unwrap()
+        .as_arr()
+        .unwrap()
+        .iter()
+        .find(|d| d.get("key").and_then(|v| v.as_str()) == Some("hit_0"))
+        .and_then(|d| d.get("value").and_then(|v| v.as_str()))
+        .unwrap()
+        .to_string();
+    assert_eq!(hit0, "0x402000");
     let bytes = evidence
         .iter()
         .find(|e| e.get("name").and_then(|v| v.as_str()) == Some("e_bytes"))
@@ -160,7 +174,7 @@ fn pe_build_rejects_a_va_outside_all_sections() {
     let model = model_with(
         &build,
         r#"
-        ev e_oob := bytes(pe1, at: 0x5000, expect: "00");
+        ev e_oob := bytes(pe1, at: 0x405000, expect: "00");
         "#,
     );
     let model_path = tmp_dir().join("pe-oob.dg");
@@ -168,6 +182,58 @@ fn pe_build_rejects_a_va_outside_all_sections() {
     let out = run(&["check", model_path.to_str().unwrap()]);
     assert!(!out.status.success());
     assert!(stdout(&out).contains("outside"), "{}", stdout(&out));
+}
+
+#[test]
+fn pe_build_rejects_a_bare_rva_below_the_image_base() {
+    let (path, sha) = write_pe("pe32-rva");
+    let build = format!(
+        "build pe1 = binary({:?}, sha256: {:?}, arch: x86_64, format: pe);",
+        path.display().to_string(),
+        sha
+    );
+    // 0x2000 is .rdata's RVA, not an address: PE builds are addressed by
+    // image-base virtual addresses (image_base 0x400000), so this is below
+    // the image base and outside every section.
+    let model = model_with(
+        &build,
+        r#"
+        ev e_rva := bytes(pe1, at: 0x2000, expect: "00");
+        "#,
+    );
+    let model_path = tmp_dir().join("pe-rva.dg");
+    fs::write(&model_path, &model).unwrap();
+    let out = run(&["check", model_path.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(stdout(&out).contains("outside"), "{}", stdout(&out));
+}
+
+#[test]
+fn pe_build_rejects_a_text_override_spanning_sections() {
+    let (path, sha) = write_pe("pe32-span");
+    // A declared `text:` range crossing from .text into .rdata must not be
+    // sliced across the inter-section file padding.
+    let build = format!(
+        "build pe1 = binary({:?}, sha256: {:?}, arch: x86_64, format: pe, text: 0x401100..0x402100);",
+        path.display().to_string(),
+        sha
+    );
+    let model = model_with(
+        &build,
+        r#"
+        fn f in pe1 at 0x401100;
+        ev e_dec := decode(pe1, f, count: 8);
+        "#,
+    );
+    let model_path = tmp_dir().join("pe-span.dg");
+    fs::write(&model_path, &model).unwrap();
+    let out = run(&["check", model_path.to_str().unwrap()]);
+    assert!(!out.status.success());
+    assert!(
+        stdout(&out).contains("spans multiple sections"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]

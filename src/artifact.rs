@@ -340,9 +340,9 @@ impl ArtifactSet {
 
     /// The virtual range of a named section. PE builds resolve the name
     /// (case-insensitively) against the parsed section table — even when a
-    /// `text:` override exists, section lookup is by name. Raw builds support
-    /// only `.text`, which maps to the declared `text:` range (or the whole
-    /// image).
+    /// `text:` override exists, section lookup is by name. All ranges are
+    /// image-base virtual addresses. Raw builds support only `.text`, which
+    /// maps to the declared `text:` range (or the whole image).
     pub fn section_range(&self, build: &str, section: &str) -> Result<(u64, u64), String> {
         let art = self
             .items
@@ -357,10 +357,9 @@ impl ArtifactSet {
         };
         if b.format == "pe" {
             let image = self.pe(build)?;
-            let sec = image
-                .section(section)
-                .ok_or_else(|| format!("unknown section {section:?} in PE build `{build}`"))?;
-            Ok((sec.va, sec.va + sec.size()))
+            image
+                .section_range(section)
+                .ok_or_else(|| format!("unknown section {section:?} in PE build `{build}`"))
         } else {
             if section != ".text" {
                 return Err(format!(
@@ -393,7 +392,7 @@ impl ArtifactSet {
 
     /// Slice a virtual range `start..end` of a build out of the file. Raw
     /// builds subtract the load base; PE builds map both endpoints through
-    /// the section table.
+    /// the section table and reject ranges that span more than one section.
     fn range_bytes<'a>(
         &'a self,
         build: &str,
@@ -422,6 +421,15 @@ impl ArtifactSet {
                 .va_to_file(end - 1)
                 .map(|off| off + 1)
                 .ok_or_else(|| format!("address {end:#x} is outside every section of `{build}`"))?;
+            // A range whose endpoints land in different sections must not be
+            // sliced across the inter-section file padding. Only a declared
+            // `text:` override can produce such a range; a section's own
+            // range never does.
+            if image.section_index_of(start) != image.section_index_of(end - 1) {
+                return Err(format!(
+                    "range {start:#x}..{end:#x} spans multiple sections of `{build}`"
+                ));
+            }
             (start_off, end_off)
         } else {
             let start_off = start.checked_sub(b.load).ok_or_else(|| {

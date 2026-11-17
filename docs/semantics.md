@@ -42,13 +42,16 @@ must match it, but the files themselves are not signed or content-addressed.
 
 **PE builds.** A build declared `format: pe` is parsed as a PE32/PE32+ image
 (DOS header, `PE\0\0` signature, COFF header, optional header, section table).
-The virtual address → file offset map `φ(b, v)` is defined by the section
-headers: `v` maps to `raw_offset + (v − va)` of the section with
-`va ≤ v < va + size` (`size` is the section's virtual size, falling back to
-its raw size when zero), and is undefined for addresses outside every section.
-`scan(b, s, p)` evaluates over `φ`-mapped section bytes for any declared
-section `s`; `bytes`/`decode`/`constants`/`modulo` use `φ` through
-`read_addr`/`text_bytes`. For raw builds only `s = ".text"` is supported.
+PE builds are addressed by **image-base virtual address**: with image base
+`B` and section RVA `r` (the parsed `Section.rva`), the map
+`φ(b, v) = raw_offset + (v − B − r)` is defined for the section with
+`r ≤ v − B < r + size` (`size` is the section's virtual size, falling back to
+its raw size when zero), and is undefined for `v < B` or outside every
+section. `scan(b, s, p)` evaluates over `φ`-mapped section bytes for any
+declared section `s`; `bytes`/`decode`/`constants`/`modulo` use `φ` through
+`read_addr`/`text_bytes`. Declared `text:` ranges use the same image-base VA
+space and must stay within a single section. For raw builds only
+`s = ".text"` is supported.
 
 ### 2.2 Evidence evaluation
 

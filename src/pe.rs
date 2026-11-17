@@ -5,6 +5,12 @@
 //! section table is parsed here so virtual addresses can be mapped back to
 //! file offsets through the section headers — no external dependencies.
 //!
+//! The public address model is the **image-base virtual address**: every
+//! address this module accepts or returns is `image_base + RVA`, exactly the
+//! addresses seen in disassemblers and reverse-engineering references. The
+//! section headers store RVAs, which live on `Section.rva`; nothing public
+//! deals in bare RVAs.
+//!
 //! The parser reads only what the kernel needs:
 //!
 //! * DOS header `e_lfanew` (file offset of the PE signature);
@@ -33,8 +39,9 @@ pub const IMAGE_SCN_CNT_UNINITIALIZED_DATA: u32 = 0x0000_0080;
 pub struct Section {
     /// Section name (e.g. `.text`), NUL-stripped.
     pub name: String,
-    /// Virtual address (RVA) of the section, relative to the image base.
-    pub va: u64,
+    /// RVA (relative virtual address) of the section, relative to the image
+    /// base. Use `image_base + rva` for an image-base virtual address.
+    pub rva: u64,
     /// Size of the section when mapped in memory.
     pub virtual_size: u64,
     /// File offset of the section's raw data.
@@ -69,17 +76,27 @@ pub struct PeImage {
 }
 
 impl PeImage {
-    /// Map a virtual address to a file offset, or `None` when the address is
-    /// outside every section or outside the file.
+    /// Map an image-base virtual address to a file offset, or `None` when the
+    /// address is below the image base, outside every section, or outside the
+    /// file.
     pub fn va_to_file(&self, va: u64) -> Option<usize> {
-        for s in &self.sections {
+        let rva = va.checked_sub(self.image_base)?;
+        let s = self.sections.iter().find(|s| {
             let size = s.size();
-            if va >= s.va && va < s.va + size {
-                let off = s.raw_offset as usize + (va - s.va) as usize;
-                return if off < self.file_len { Some(off) } else { None };
-            }
-        }
-        None
+            rva >= s.rva && rva < s.rva + size
+        })?;
+        let off = s.raw_offset as usize + (rva - s.rva) as usize;
+        (off < self.file_len).then_some(off)
+    }
+
+    /// Index of the section containing a virtual address, or `None` when the
+    /// address is below the image base or outside every section.
+    pub fn section_index_of(&self, va: u64) -> Option<usize> {
+        let rva = va.checked_sub(self.image_base)?;
+        self.sections.iter().position(|s| {
+            let size = s.size();
+            rva >= s.rva && rva < s.rva + size
+        })
     }
 
     /// Look a section up by name, case-insensitively (`.TEXT` and `.text` are
@@ -91,15 +108,29 @@ impl PeImage {
             .find(|s| s.name.eq_ignore_ascii_case(name))
     }
 
-    /// The virtual range of the executable code: the section named `.text`
-    /// when present, otherwise the first section with `IMAGE_SCN_MEM_EXECUTE`.
+    /// The image-base virtual range of a named section, or `None` when the
+    /// section does not exist.
+    pub fn section_range(&self, name: &str) -> Option<(u64, u64)> {
+        let sec = self.section(name)?;
+        Some((
+            self.image_base + sec.rva,
+            self.image_base + sec.rva + sec.size(),
+        ))
+    }
+
+    /// The image-base virtual range of the executable code: the section named
+    /// `.text` when present, otherwise the first section with
+    /// `IMAGE_SCN_MEM_EXECUTE`.
     pub fn executable_range(&self) -> Option<(u64, u64)> {
         let sec = self.section(".text").or_else(|| {
             self.sections
                 .iter()
                 .find(|s| s.characteristics & IMAGE_SCN_MEM_EXECUTE != 0)
         })?;
-        Some((sec.va, sec.va + sec.size()))
+        Some((
+            self.image_base + sec.rva,
+            self.image_base + sec.rva + sec.size(),
+        ))
     }
 }
 
@@ -170,7 +201,7 @@ pub fn parse(bytes: &[u8]) -> Result<PeImage, String> {
         sections.push(Section {
             name,
             virtual_size: rd_u32(bytes, entry + 8, "section header")? as u64,
-            va: rd_u32(bytes, entry + 12, "section header")? as u64,
+            rva: rd_u32(bytes, entry + 12, "section header")? as u64,
             raw_size: rd_u32(bytes, entry + 16, "section header")? as u64,
             raw_offset: rd_u32(bytes, entry + 20, "section header")? as u64,
             characteristics: rd_u32(bytes, entry + 36, "section header")?,
@@ -213,8 +244,11 @@ mod tests {
 
     /// Build a synthetic PE32 image in memory:
     ///
-    /// * `.text`  VA 0x1000, raw at 0x200, 0x200 bytes (executable);
-    /// * `.rdata` VA 0x2000, raw at 0x400, 0x200 bytes, 0x100 mapped.
+    /// * image base 0x400000;
+    /// * `.text`  RVA 0x1000 (VA 0x401000), raw at 0x200, 0x200 bytes
+    ///   (executable);
+    /// * `.rdata` RVA 0x2000 (VA 0x402000), raw at 0x400, 0x200 bytes of raw
+    ///   data of which 0x100 are mapped.
     ///
     /// The file is 0x600 bytes: 0x200 of headers, then the two sections.
     fn synthetic_pe32() -> Vec<u8> {
@@ -268,7 +302,7 @@ mod tests {
         assert!(image.is_pe32);
         assert_eq!(image.sections.len(), 2);
         assert_eq!(image.sections[0].name, ".text");
-        assert_eq!(image.sections[0].va, 0x1000);
+        assert_eq!(image.sections[0].rva, 0x1000);
         assert_eq!(image.sections[1].name, ".rdata");
         assert_eq!(
             image.sections[1].characteristics,
@@ -277,21 +311,33 @@ mod tests {
     }
 
     #[test]
-    fn maps_virtual_addresses_through_sections() {
+    fn maps_image_base_virtual_addresses_through_sections() {
         let image = parse(&synthetic_pe32()).unwrap();
-        // .text: VA 0x1000 -> file 0x200.
-        assert_eq!(image.va_to_file(0x1000), Some(0x200));
-        assert_eq!(image.va_to_file(0x1004), Some(0x204));
-        // .rdata: VA 0x2000 -> file 0x400, limited to its 0x100 virtual size.
-        assert_eq!(image.va_to_file(0x2000), Some(0x400));
-        assert_eq!(image.va_to_file(0x20FF), Some(0x4FF));
-        // The gap between sections is unmapped.
-        assert_eq!(image.va_to_file(0x1FFF), None);
+        // .text: VA 0x401000 -> file 0x200.
+        assert_eq!(image.va_to_file(0x401000), Some(0x200));
+        assert_eq!(image.va_to_file(0x401004), Some(0x204));
+        // .rdata: VA 0x402000 -> file 0x400, limited to its 0x100 mapped size.
+        assert_eq!(image.va_to_file(0x402000), Some(0x400));
+        assert_eq!(image.va_to_file(0x4020FF), Some(0x4FF));
+        // A bare RVA below the image base is not addressable.
+        assert_eq!(image.va_to_file(0x2000), None);
+        // The gap between the sections is unmapped.
+        assert_eq!(image.va_to_file(0x401FFF), None);
+        // Past the mapped size of .rdata.
+        assert_eq!(image.va_to_file(0x402100), None);
+        // .rdata raw data beyond the mapped size is not addressable.
+        assert_eq!(image.va_to_file(0x402200), None);
         // Past the end of the last section.
-        assert_eq!(image.va_to_file(0x2100), None);
-        assert_eq!(image.va_to_file(0x5000), None);
-        // .rdata raw data beyond the virtual size is not addressable.
-        assert_eq!(image.va_to_file(0x2200), None);
+        assert_eq!(image.va_to_file(0x405000), None);
+    }
+
+    #[test]
+    fn section_index_of_identifies_the_containing_section() {
+        let image = parse(&synthetic_pe32()).unwrap();
+        assert_eq!(image.section_index_of(0x401000), Some(0));
+        assert_eq!(image.section_index_of(0x402000), Some(1));
+        assert_eq!(image.section_index_of(0x2000), None); // below image base
+        assert_eq!(image.section_index_of(0x401FFF), None); // between sections
     }
 
     #[test]
@@ -301,14 +347,22 @@ mod tests {
             image.section(".RData").map(|s| s.name.as_str()),
             Some(".rdata")
         );
-        assert_eq!(image.section(".TEXT").map(|s| s.va), Some(0x1000));
+        assert_eq!(image.section(".TEXT").map(|s| s.rva), Some(0x1000));
         assert!(image.section(".nope").is_none());
+    }
+
+    #[test]
+    fn reports_section_ranges_in_image_base_vas() {
+        let image = parse(&synthetic_pe32()).unwrap();
+        assert_eq!(image.section_range(".text"), Some((0x401000, 0x401200)));
+        assert_eq!(image.section_range(".rdata"), Some((0x402000, 0x402100)));
+        assert_eq!(image.section_range(".nope"), None);
     }
 
     #[test]
     fn prefers_text_for_the_executable_range() {
         let image = parse(&synthetic_pe32()).unwrap();
-        assert_eq!(image.executable_range(), Some((0x1000, 0x1200)));
+        assert_eq!(image.executable_range(), Some((0x401000, 0x401200)));
     }
 
     #[test]
@@ -324,7 +378,7 @@ mod tests {
                 .to_le_bytes(),
         );
         let image = parse(&bytes).unwrap();
-        assert_eq!(image.executable_range(), Some((0x1000, 0x1200)));
+        assert_eq!(image.executable_range(), Some((0x401000, 0x401200)));
     }
 
     #[test]
@@ -336,6 +390,9 @@ mod tests {
         let image = parse(&bytes).unwrap();
         assert!(!image.is_pe32);
         assert_eq!(image.image_base, 0x140000000);
+        // Addresses stay in the image-base VA space.
+        assert_eq!(image.va_to_file(0x140001000), Some(0x200));
+        assert_eq!(image.va_to_file(0x401000), None); // below the image base
     }
 
     #[test]

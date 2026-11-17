@@ -817,7 +817,11 @@ impl ModelIndex {
 
     /// Best-effort read of a declared artifact path for validation-time
     /// checks. Paths are resolved against the model directory; `None` means
-    /// "not loadable here" (evaluation will report the real error).
+    /// "not loadable here" (evaluation will report the real error). The
+    /// `--artifacts` root cannot be known at validation time (`ModelIndex::new`
+    /// runs before artifacts are located), so a build reachable only through
+    /// `--artifacts` is treated as unreadable and its PE section check is
+    /// skipped.
     fn read_build_bytes(&self, path: &str) -> Option<Vec<u8>> {
         let p = Path::new(path);
         let full = if p.is_absolute() {

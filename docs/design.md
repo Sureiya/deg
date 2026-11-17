@@ -135,7 +135,8 @@ dataset ds_state = dataset("../fixtures/mt-state-b1.txt",
 
 - **build** — a raw image with a virtual load base and an optional `.text`
   virtual range, or (`format: pe`) a PE32/PE32+ image whose section table is
-  parsed so virtual addresses map to file offsets through the section headers.
+  parsed so image-base virtual addresses (`image_base + RVA`) map to file
+  offsets through the section headers.
   Scans operate on the declared range/`.text` for raw builds and on named
   sections (`.text`, `.rdata`, `.data`, …) for PE builds; `bytes`/`decode` map
   virtual addresses to file offsets in both cases.
@@ -149,14 +150,19 @@ dataset ds_state = dataset("../fixtures/mt-state-b1.txt",
 
 Virtual addresses are used throughout. For a raw build with `load = L`, the
 file offset of virtual address `v` is `v - L`; the `.text` range is virtual.
-For a PE build, `load:` is ignored and every address is resolved through the
-parsed section table (DOS `e_lfanew`, `PE\0\0` signature, COFF section count,
-optional-header magic/image base/section alignment, 40-byte section entries).
-This keeps model files readable (`0x140001000`) while removing the "load bias"
-hack for real binaries. A declared `text:` range on a PE build still overrides
-the derived executable range; a scan with any other section name is resolved
-against the PE section table (case-insensitively) and is a validation error if
-the section does not exist.
+For a PE build, `load:` is ignored and every address is an **image-base
+virtual address** (`image_base + RVA`) — the same address space disassemblers
+and reverse-engineering references use. The parsed section table (DOS
+`e_lfanew`, `PE\0\0` signature, COFF section count, optional-header
+magic/image base/section alignment, 40-byte section entries whose
+`Section.rva` fields hold RVAs) maps `v` to `raw_offset + (v − image_base −
+rva)` within the containing section; addresses below the image base or
+outside every section are unmapped. This keeps model files readable
+(`0x140001000`) while removing the "load bias" hack for real binaries. A
+declared `text:` range on a PE build uses the same image-base VA space and
+overrides the derived executable range; a scan with any other section name is
+resolved against the PE section table (case-insensitively) and is a
+validation error if the section does not exist.
 
 ## 5. Evidence
 

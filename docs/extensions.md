@@ -16,7 +16,7 @@ was not reviewed and built into the binary.
 ```rust
 use deg::ast::EvidenceDecl;
 use deg::artifact::ArtifactSet;
-use deg::evidence::{EvidenceOutcome, EvalCtx};
+use deg::evidence::EvidenceOutcome;
 use deg::semantic::ModelIndex;
 use deg::strength::Strength;
 use deg::value::Value;
