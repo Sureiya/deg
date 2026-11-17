@@ -6,7 +6,7 @@ build:
 	cargo build --release
 
 test:
-	cargo test --workspace
+	cargo test
 
 clippy:
 	cargo clippy --all-targets -- -D warnings
