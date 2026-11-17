@@ -6,8 +6,10 @@
 //! loaded for diagnostics, but no proof may use it.
 
 use crate::ast::{BuildDecl, CaptureDecl, DatasetDecl, DumpDecl, Item, Model};
+use crate::pe::PeImage;
 use crate::sha256::sha256_hex;
 use crate::value::{find_pattern, parse_byte_pattern, PatternByte};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -73,6 +75,9 @@ pub struct ArtifactSet {
     pub model_dir: PathBuf,
     pub items: BTreeMap<String, LoadedArtifact>,
     pub errors: Vec<String>,
+    /// Parsed PE images, memoized per PE build on first use. Parse errors are
+    /// cached too, so a broken PE fails identically everywhere.
+    pe_cache: RefCell<BTreeMap<String, Result<PeImage, String>>>,
 }
 
 impl ArtifactSet {
@@ -161,6 +166,7 @@ impl ArtifactSet {
             model_dir,
             items,
             errors,
+            pe_cache: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -212,23 +218,60 @@ impl ArtifactSet {
         Ok(&art.bytes)
     }
 
-    /// Map a virtual address in a build/dump to a file offset.
+    /// Map a virtual address in a build/dump to a file offset. PE builds map
+    /// through their section table; raw builds/dumps use the declared load
+    /// base / dump base.
     pub fn file_offset(&self, artifact: &str, addr: u64) -> Option<usize> {
         let art = self.items.get(artifact)?;
         if !art.verified {
             return None;
         }
-        let base = match &art.decl {
-            ArtifactDecl::Build(b) => b.load,
-            ArtifactDecl::Dump(d) => d.base,
-            _ => return None,
-        };
-        let off = addr.checked_sub(base)? as usize;
-        if off <= art.bytes.len() {
-            Some(off)
-        } else {
-            None
+        match &art.decl {
+            ArtifactDecl::Build(b) if b.format == "pe" => self.pe(artifact).ok()?.va_to_file(addr),
+            ArtifactDecl::Build(b) => {
+                let off = addr.checked_sub(b.load)? as usize;
+                if off <= art.bytes.len() {
+                    Some(off)
+                } else {
+                    None
+                }
+            }
+            ArtifactDecl::Dump(d) => {
+                let off = addr.checked_sub(d.base)? as usize;
+                if off <= art.bytes.len() {
+                    Some(off)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
+    }
+
+    /// The parsed PE image of a `format: pe` build, memoized.
+    pub fn pe(&self, build: &str) -> Result<PeImage, String> {
+        if let Some(cached) = self.pe_cache.borrow().get(build) {
+            return cached.clone();
+        }
+        let art = self
+            .items
+            .get(build)
+            .ok_or_else(|| format!("unknown build `{build}`"))?;
+        let b = match &art.decl {
+            ArtifactDecl::Build(b) => b,
+            _ => return Err(format!("`{build}` is not a binary build")),
+        };
+        if b.format != "pe" {
+            return Err(format!(
+                "build `{build}` is not a PE image (format: {})",
+                b.format
+            ));
+        }
+        let parsed = crate::pe::parse(&art.bytes).map_err(|e| format!("build `{build}`: {e}"));
+        self.pe_cache
+            .borrow_mut()
+            .insert(build.to_string(), parsed.clone());
+        parsed
     }
 
     pub fn read_addr(&self, artifact: &str, addr: u64, len: usize) -> Result<Vec<u8>, String> {
@@ -248,6 +291,13 @@ impl ArtifactSet {
                 ))
             }
         }
+        // For PE builds, surface a PE parse error instead of a misleading
+        // "address outside" message.
+        if let ArtifactDecl::Build(b) = &art.decl {
+            if b.format == "pe" {
+                self.pe(artifact)?;
+            }
+        }
         let off = self
             .file_offset(artifact, addr)
             .ok_or_else(|| format!("address {addr:#x} is outside `{artifact}`"))?;
@@ -259,8 +309,9 @@ impl ArtifactSet {
         Ok(art.bytes[off..off + len].to_vec())
     }
 
-    /// The virtual range of a build's `.text`, or the whole image if no range
-    /// was declared.
+    /// The virtual range of a build's `.text`: a declared `text:` override
+    /// wins; a PE build falls back to its executable section; otherwise the
+    /// whole image.
     pub fn text_range(&self, build: &str) -> Result<(u64, u64), String> {
         let art = self
             .items
@@ -275,12 +326,85 @@ impl ArtifactSet {
         };
         match b.text {
             Some((start, end)) => Ok((start, end)),
-            None => Ok((b.load, b.load + art.bytes.len() as u64)),
+            None => {
+                if b.format == "pe" {
+                    self.pe(build)?
+                        .executable_range()
+                        .ok_or_else(|| format!("PE build `{build}` has no executable section"))
+                } else {
+                    Ok((b.load, b.load + art.bytes.len() as u64))
+                }
+            }
         }
     }
 
+    /// The virtual range of a named section. PE builds resolve the name
+    /// (case-insensitively) against the parsed section table — even when a
+    /// `text:` override exists, section lookup is by name. Raw builds support
+    /// only `.text`, which maps to the declared `text:` range (or the whole
+    /// image).
+    pub fn section_range(&self, build: &str, section: &str) -> Result<(u64, u64), String> {
+        let art = self
+            .items
+            .get(build)
+            .ok_or_else(|| format!("unknown build `{build}`"))?;
+        if !art.verified {
+            return Err(format!("build `{build}` is not verified"));
+        }
+        let b = match &art.decl {
+            ArtifactDecl::Build(b) => b,
+            _ => return Err(format!("`{build}` is not a binary build")),
+        };
+        if b.format == "pe" {
+            let image = self.pe(build)?;
+            let sec = image
+                .section(section)
+                .ok_or_else(|| format!("unknown section {section:?} in PE build `{build}`"))?;
+            Ok((sec.va, sec.va + sec.size()))
+        } else {
+            if section != ".text" {
+                return Err(format!(
+                    "unknown section {section:?} in raw build `{build}`; only `.text` is supported"
+                ));
+            }
+            self.text_range(build)
+        }
+    }
+
+    /// The bytes of a named section as `(start VA, slice)`. For PE builds the
+    /// virtual range is mapped back to the file through the section table; for
+    /// raw builds `.text` is the declared text range.
+    pub fn section_bytes<'a>(
+        &'a self,
+        build: &str,
+        section: &str,
+    ) -> Result<(u64, &'a [u8]), String> {
+        let (start, end) = self.section_range(build, section)?;
+        self.range_bytes(build, start, end)
+    }
+
+    /// The bytes of a build's `.text` as `(start VA, slice)`. Kept for
+    /// compatibility; equivalent to `section_bytes(build, ".text")` for raw
+    /// builds and to the declared/derived text range for PE builds.
     pub fn text_bytes<'a>(&'a self, build: &str) -> Result<(u64, &'a [u8]), String> {
         let (start, end) = self.text_range(build)?;
+        self.range_bytes(build, start, end)
+    }
+
+    /// Slice a virtual range `start..end` of a build out of the file. Raw
+    /// builds subtract the load base; PE builds map both endpoints through
+    /// the section table.
+    fn range_bytes<'a>(
+        &'a self,
+        build: &str,
+        start: u64,
+        end: u64,
+    ) -> Result<(u64, &'a [u8]), String> {
+        if start >= end {
+            return Err(format!(
+                "empty address range {start:#x}..{end:#x} in `{build}`"
+            ));
+        }
         let art = self
             .items
             .get(build)
@@ -289,36 +413,60 @@ impl ArtifactSet {
             ArtifactDecl::Build(b) => b,
             _ => return Err(format!("`{build}` is not a binary build")),
         };
-        let start_off = start
-            .checked_sub(b.load)
-            .ok_or_else(|| format!("text start {start:#x} is below image base {:#x}", b.load))?
-            as usize;
-        let end_off = end
-            .checked_sub(b.load)
-            .ok_or_else(|| format!("text end {end:#x} is below image base {:#x}", b.load))?
-            as usize;
+        let (start_off, end_off) = if b.format == "pe" {
+            let image = self.pe(build)?;
+            let start_off = image.va_to_file(start).ok_or_else(|| {
+                format!("address {start:#x} is outside every section of `{build}`")
+            })?;
+            let end_off = image
+                .va_to_file(end - 1)
+                .map(|off| off + 1)
+                .ok_or_else(|| format!("address {end:#x} is outside every section of `{build}`"))?;
+            (start_off, end_off)
+        } else {
+            let start_off = start.checked_sub(b.load).ok_or_else(|| {
+                format!("range start {start:#x} is below image base {:#x}", b.load)
+            })? as usize;
+            let end_off = end
+                .checked_sub(b.load)
+                .ok_or_else(|| format!("range end {end:#x} is below image base {:#x}", b.load))?
+                as usize;
+            (start_off, end_off)
+        };
         if start_off > art.bytes.len() || end_off > art.bytes.len() || start_off >= end_off {
             return Err(format!(
-                "text range {start:#x}..{end:#x} is outside `{build}` ({} bytes)",
+                "range {start:#x}..{end:#x} is outside `{build}` ({} bytes)",
                 art.bytes.len()
             ));
         }
         Ok((start, &art.bytes[start_off..end_off]))
     }
 
-    pub fn scan_build(&self, build: &str, pattern: &str) -> Result<Vec<u64>, String> {
+    /// Scan a named section of a build for a byte pattern. Returned addresses
+    /// are virtual (raw builds: load base + offset).
+    pub fn scan_build(
+        &self,
+        build: &str,
+        section: &str,
+        pattern: &str,
+    ) -> Result<Vec<u64>, String> {
         let parsed = parse_byte_pattern(pattern)?;
-        let (start, bytes) = self.text_bytes(build)?;
-        let hits = find_pattern(bytes, &parsed);
-        Ok(hits.into_iter().map(|off| start + off as u64).collect())
+        self.scan_build_pattern(build, section, &parsed)
     }
 
+    /// Scan a build's `.text`; kept as a compatibility wrapper.
+    pub fn scan_build_text(&self, build: &str, pattern: &str) -> Result<Vec<u64>, String> {
+        self.scan_build(build, ".text", pattern)
+    }
+
+    /// Scan a named section of a build for a pre-parsed byte pattern.
     pub fn scan_build_pattern(
         &self,
         build: &str,
+        section: &str,
         pattern: &[PatternByte],
     ) -> Result<Vec<u64>, String> {
-        let (start, bytes) = self.text_bytes(build)?;
+        let (start, bytes) = self.section_bytes(build, section)?;
         let hits = find_pattern(bytes, pattern);
         Ok(hits.into_iter().map(|off| start + off as u64).collect())
     }

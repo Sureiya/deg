@@ -10,6 +10,7 @@ use crate::stdlib::stdlib_rules;
 use crate::strength::Strength;
 use crate::value::{Lit, Value};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ModelIndex {
@@ -361,6 +362,12 @@ impl ModelIndex {
             EvidenceKind::Rate { capture, .. } | EvidenceKind::Sample { capture, .. } => {
                 self.captures.get(capture).and_then(|c| c.build.clone())
             }
+            EvidenceKind::Table { dataset, .. } => {
+                self.datasets.get(dataset).and_then(|d| d.build.clone())
+            }
+            EvidenceKind::Extension { kind, .. } => crate::ext::get(kind)
+                .and_then(|ext| ext.build)
+                .and_then(|hook| hook(self, ev)),
         }
     }
 
@@ -604,9 +611,32 @@ impl ModelIndex {
                     if !self.builds.contains_key(build) {
                         continue;
                     }
-                    if section != ".text" {
+                    let b = &self.builds[build];
+                    if b.format == "pe" {
+                        // PE section names are resolved against the parsed
+                        // section table. The check runs when the artifact is
+                        // loadable from the model directory; if it cannot be
+                        // read here, skip it and let evaluation report the
+                        // artifact error.
+                        if let Some(bytes) = self.read_build_bytes(&b.path) {
+                            match crate::pe::parse(&bytes) {
+                                Ok(image) => {
+                                    if image.section(section).is_none() {
+                                        errors.push(format!(
+                                            "evidence `{}`: build `{build}` has no PE section named {section:?}",
+                                            ev.name
+                                        ));
+                                    }
+                                }
+                                Err(e) => errors.push(format!(
+                                    "evidence `{}`: build `{build}` is not a valid PE image: {e}",
+                                    ev.name
+                                )),
+                            }
+                        }
+                    } else if section != ".text" {
                         errors.push(format!(
-                            "evidence `{}`: only .text scans are supported (got {section:?})",
+                            "evidence `{}`: raw builds support only `.text` scans (got {section:?})",
                             ev.name
                         ));
                     }
@@ -755,8 +785,51 @@ impl ModelIndex {
                         errors.push(format!("evidence `{}`: empty absence scope", ev.name));
                     }
                 }
+                EvidenceKind::Table { dataset, .. } => {
+                    if !self.datasets.contains_key(dataset) {
+                        errors.push(format!(
+                            "evidence `{}` refers to unknown dataset `{dataset}`",
+                            ev.name
+                        ));
+                    }
+                }
+                EvidenceKind::Extension { kind, .. } => {
+                    // Registered extensions may bind their evidence to a build
+                    // through the `build` hook; check that reference. An
+                    // unregistered kind is not an error here: evaluation will
+                    // fail with a message naming the missing registration.
+                    if let Some(ext) = crate::ext::get(kind) {
+                        if let Some(hook) = ext.build {
+                            if let Some(build) = hook(self, ev) {
+                                if !self.builds.contains_key(&build) {
+                                    errors.push(format!(
+                                        "evidence `{}` refers to unknown build `{build}`",
+                                        ev.name
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
+    }
+
+    /// Best-effort read of a declared artifact path for validation-time
+    /// checks. Paths are resolved against the model directory; `None` means
+    /// "not loadable here" (evaluation will report the real error).
+    fn read_build_bytes(&self, path: &str) -> Option<Vec<u8>> {
+        let p = Path::new(path);
+        let full = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            Path::new(&self.path)
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(p)
+        };
+        std::fs::read(&full).ok()
     }
 
     fn need_build(&self, build: &str, ev: &str, errors: &mut Vec<String>) {

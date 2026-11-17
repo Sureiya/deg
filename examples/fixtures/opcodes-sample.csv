@@ -1,0 +1,8 @@
+# Synthetic x86 one-byte opcode manifest used by the `table` evidence example.
+# Cells mix strings, decimal integers, and 0x-hex integers.
+mnemonic,opcode,bytes,flags
+nop,0x90,1,ok
+ret,0xC3,1,ok
+push,0x50,1,ok
+mov,0x8B,2,modrm
+jmp,0xE9,5,rel32

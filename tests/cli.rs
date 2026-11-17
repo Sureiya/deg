@@ -248,6 +248,14 @@ fn stdlib_is_inspectable() {
 }
 
 #[test]
+fn extensions_command_lists_registered_kinds() {
+    let out = run(&["extensions"]);
+    assert!(out.status.success());
+    // The core binary registers no compiled-in evidence extensions.
+    assert_eq!(stdout(&out).trim(), "");
+}
+
+#[test]
 fn strict_check_rejects_hypotheses() {
     let out = run(&["check", "examples/position/model.dg", "--strict"]);
     assert!(!out.status.success());

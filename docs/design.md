@@ -123,6 +123,9 @@ build b1 = binary("../fixtures/game-b1.bin",
   sha256: "470d…", arch: x86_64,
   load: 0x140000000, text: 0x140001000..0x140001400);
 
+build b2 = binary("../fixtures/client.exe",
+  sha256: "9f3a…", arch: x86_64, format: pe);
+
 capture c1 = capture("../fixtures/session-b1.pcap",
   sha256: "c9c0…", build: b1);
 
@@ -131,19 +134,29 @@ dataset ds_state = dataset("../fixtures/mt-state-b1.txt",
 ```
 
 - **build** — a raw image with a virtual load base and an optional `.text`
-  virtual range. Scans operate on the declared range; `bytes`/`decode` map
-  virtual addresses to file offsets.
+  virtual range, or (`format: pe`) a PE32/PE32+ image whose section table is
+  parsed so virtual addresses map to file offsets through the section headers.
+  Scans operate on the declared range/`.text` for raw builds and on named
+  sections (`.text`, `.rdata`, `.data`, …) for PE builds; `bytes`/`decode` map
+  virtual addresses to file offsets in both cases.
 - **capture** — a pcap (Ethernet or raw IPv4, UDP). `rate` and `sample` read
   timestamps and payload fields from it.
 - **dump** — a raw memory image with a virtual base, for `bytes` evidence.
 - **dataset** — a content-addressed text file (integers, one or more per line).
-  Used for RNG state/output witnesses and as a place to commit derived samples.
-  A dataset may declare `from: c1` to record provenance.
+  Used for RNG state/output witnesses, `table` evidence, and as a place to
+  commit derived samples. A dataset may declare `from: c1` to record
+  provenance.
 
-Virtual addresses are used throughout. For a build with `load = L`, the file
-offset of virtual address `v` is `v - L`; the `.text` range is virtual. This
-keeps model files readable (`0x140001000`) without requiring PE/ELF parsing in
-the kernel.
+Virtual addresses are used throughout. For a raw build with `load = L`, the
+file offset of virtual address `v` is `v - L`; the `.text` range is virtual.
+For a PE build, `load:` is ignored and every address is resolved through the
+parsed section table (DOS `e_lfanew`, `PE\0\0` signature, COFF section count,
+optional-header magic/image base/section alignment, 40-byte section entries).
+This keeps model files readable (`0x140001000`) while removing the "load bias"
+hack for real binaries. A declared `text:` range on a PE build still overrides
+the derived executable range; a scan with any other section name is resolved
+against the PE section table (case-insensitively) and is a validation error if
+the section does not exist.
 
 ## 5. Evidence
 
@@ -154,13 +167,14 @@ a **strength computed by the kernel**:
 ev e_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 00 00") |> unique;
 ev e_shape  := decode(b1, read_position, count: 8);
 ev e_recover := recovery(srv_rng, state: ds_state, index: 624, observed: ds_obs);
+ev e_ops     := table(ds_ops, format: "csv", has_header: true);
 ```
 
 ### Evidence primitives (implemented)
 
 | Evidence | Certificate / check | Strength |
 |---|---|---|
-| `scan(build, ".text", pattern)` | byte-pattern sweep; `\|> unique` requires exactly one hit over the whole declared section | Deterministic if unique, else Heuristic |
+| `scan(build, section, pattern)` | byte-pattern sweep; `\|> unique` requires exactly one hit over the whole section (`.text` for raw builds, any named PE section for `format: pe` builds) | Deterministic if unique, else Heuristic |
 | `bytes(artifact, at, expect)` | exact bytes at a virtual address in a hashed build/dump | Deterministic |
 | `decode(build, fn, count)` | narrow x86-64 decoder: scalar/SSE loads and stores, small integer idioms; emits `loads_set`/`stores_set` by width and offset | Deterministic if the whole requested window decoded, else Heuristic |
 | `constants(build, at, window, values)` | each constant present, counts derived from bytes; `\|> unique` requires one occurrence each | Deterministic if unique, else Heuristic |
@@ -168,6 +182,7 @@ ev e_recover := recovery(srv_rng, state: ds_state, index: 624, observed: ds_obs)
 | `recovery(rng, state, index, observed, projection)` | forward-simulates LCG / xorshift32 / xorshift128 / MT19937 from a witness state, compares outputs (optionally projected bits) to a hashed dataset | Deterministic (Heuristic for a single output) |
 | `rate(capture, opcode, clock)` | pcap timestamps, median inter-arrival, MAD-based CI, coverage, split-half stationarity | Observational (Heuristic if nonstationary) |
 | `sample(capture, opcode, field, width, endian)` | payload field extraction, histogram, coverage | Observational |
+| `table(dataset, format, has_header)` | parse a delimiter-separated dataset (`csv`/`tsv`/`ws`, optional header row) into `row(ev, idx, [cells…])`, `table_rows`, `table_cols` facts; cells are integers (decimal or `0x…`) or symbols | Deterministic (a pure parse) |
 | `symbols(build, store)` | store build digest must match; symbols and PDB-like types compared exactly to the model | Exact |
 | `external(path, kind, build)` | certificate schema + build digest; **analysis not re-run** | Observational |
 | `absence(path, build, scope, during)` | audited absence certificate: scope inside `.text`, time window inside the capture, no listed writes | Observational |
@@ -184,6 +199,45 @@ not the truth of the analysis. Certificate files are inputs, not
 content-addressed artifacts in v0.1; hashing and signing them is future work.
 A future version can add a verified checker for a specific dataflow engine and
 promote *that* certificate class.
+
+### Compiled-in evidence extensions
+
+The core evidence kinds are fixed, but a domain crate (for example a
+game-specific adapter) can compile **additional evidence kinds into the binary**
+and register them through `deg::ext::register`:
+
+```rust
+deg::ext::register("manifest", deg::ext::Extension {
+    eval: my_manifest_eval,
+    build: Some(my_manifest_build),
+    describe: "opcode manifest rows from a dataset",
+});
+```
+
+A model can then write `ev e := manifest(ops, n: 3);`. The registry is the
+same trust boundary as the core evaluators, with the same rules:
+
+- **Compiled in, not loaded.** An extension is a function pointer in the
+  trusted binary. There is no runtime loading, no dynamic library, and no
+  path from a model file to executable code. `deg extensions` lists the kinds
+  a binary was built with (the core binary lists none).
+- **Reviewed like core primitives.** Because an extension runs inside the
+  kernel's evidence stage, it must obey the strength rules: it may emit
+  `Deterministic` facts only when it *itself* re-derived them from verified
+  artifact bytes, and anything it admits without re-checking (certificates,
+  measurements) must stay capped at `Observational`, exactly like the core
+  evaluators. Extensions are documented in [extensions.md](extensions.md).
+- **Same strength algebra.** Extension facts flow through the ordinary
+  maximin lattice with the ordinary support sets; the kernel does not know or
+  care which evaluator produced a fact, only its strength and provenance.
+- **Unregistered kinds fail loudly.** A model using an unknown kind parses,
+  but evaluation fails with `evidence kind … is not registered` and the list
+  of kinds this binary has. A model written for an extended binary therefore
+  does not silently degrade under the core binary.
+
+This is the mechanism that keeps the kernel small while letting domain
+analyses become first-class, kernel-checked evidence instead of
+Observational-capped certificates.
 
 ### Negative evidence
 
@@ -718,7 +772,10 @@ should be conservative.
 | Area | v0.1 |
 |---|---|
 | Artifact hashing, virtual mapping, pcap parse | ✅ |
+| PE32/PE32+ build parsing, section-table address mapping | ✅ |
 | Scan / bytes / narrow x86 decode / constants / modulo | ✅ |
+| Table (dataset) evidence | ✅ |
+| Compiled-in evidence extension registry (`deg extensions`) | ✅ (no built-ins registered) |
 | MT19937, xorshift32/128, LCG forward simulation | ✅ |
 | Recovery witnesses, projections, refutation by mismatch | ✅ |
 | Rate/period claims, coverage, CI, stationarity | ✅ |
@@ -737,8 +794,9 @@ should be conservative.
 
 The judgments, strength algebra, seal conditions, conflict resolution, and port
 relation are specified in [semantics.md](semantics.md). The complete surface
-grammar is in [grammar.ebnf](grammar.ebnf). The design conversation that seeded
-this project is recorded in [source.md](source.md).
+grammar is in [grammar.ebnf](grammar.ebnf). The compiled-in evidence extension
+registry is documented in [extensions.md](extensions.md). The design
+conversation that seeded this project is recorded in [source.md](source.md).
 
 The honest soundness claim is:
 

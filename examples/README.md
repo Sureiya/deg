@@ -83,6 +83,7 @@ carried.
 | `mt-state-b1.txt`, `mt-observed-b1.txt` | MT19937 state and 64 outputs |
 | `mt-state-b2.txt`, `mt-observed-b2.txt` | a different stream for the port example |
 | `xs-state.txt` | 4-word xorshift128 state for the refutation |
+| `opcodes-sample.csv` | header + mixed int/string cells for the `table` evidence tests |
 | `trace.json` | external packet-field → function dataflow certificate |
 | `absence.json` | audited `.text` / time-window absence certificate |
 | `observability.json` | external connection/window observability certificate |

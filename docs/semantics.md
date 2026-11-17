@@ -40,6 +40,16 @@ Symbol stores and external certificate files are *inputs* rather than declared
 artifacts in v0.1; a certificate must carry the build digest, and a symbol store
 must match it, but the files themselves are not signed or content-addressed.
 
+**PE builds.** A build declared `format: pe` is parsed as a PE32/PE32+ image
+(DOS header, `PE\0\0` signature, COFF header, optional header, section table).
+The virtual address → file offset map `φ(b, v)` is defined by the section
+headers: `v` maps to `raw_offset + (v − va)` of the section with
+`va ≤ v < va + size` (`size` is the section's virtual size, falling back to
+its raw size when zero), and is undefined for addresses outside every section.
+`scan(b, s, p)` evaluates over `φ`-mapped section bytes for any declared
+section `s`; `bytes`/`decode`/`constants`/`modulo` use `φ` through
+`read_addr`/`text_bytes`. For raw builds only `s = ".text"` is supported.
+
 ### 2.2 Evidence evaluation
 
 ```
@@ -70,13 +80,35 @@ The strength assignment is fixed per primitive:
 | `rate`, stationary | `Observational` |
 | `rate`, nonstationary | `Heuristic` |
 | `sample` | `Observational` |
+| `table`, parsed | `Deterministic` (a pure re-derivation from dataset bytes) |
 | `symbols`, build and type match | `Exact` (store is a trusted input) |
 | `external` | `Observational` |
 | `absence` | `Observational` |
+| extension kind | whatever strength the compiled-in evaluator assigns; the extension is part of the trusted binary and must follow the same strength discipline |
 
 A failed evaluator produces no facts. Failures are hard errors in `deg check`
 when the evidence is declared, even if unused; a model with a broken evidence
 term has a broken audit trail.
+
+**Extension evaluation.** A kind that is not one of the built-in primitives is
+looked up in the compiled-in extension registry (see
+[extensions.md](extensions.md)). The registered evaluator computes the outcome
+under the ordinary judgment `A; E ⇓ (F_E, s_E, cert_E)`; its facts flow through
+the same lattice, support sets, and reports as core facts. An unregistered
+kind fails evaluation with `evidence kind … is not registered`; this is a hard
+error, exactly like any other failed evidence.
+
+**Table evaluation.** `table(ds, format, has_header)` reads the verified
+dataset and parses it into rows. Blank lines and lines starting with `#` are
+skipped; with `has_header: true` the first remaining line supplies header
+cells (kept as details, not facts). Cells are split by `,` (`csv`), tab
+(`tsv`), or whitespace runs (`ws`) and trimmed. A cell is `Int(n)` when it
+parses as a decimal integer or as hex after a `0x`/`0X` prefix, and `Sym(s)`
+otherwise (an empty cell is `Sym("")`). For each data row `i` (0-based) the
+evaluator emits `row(e, i, [cells…])`, plus `table_rows(e, n)` and
+`table_cols(e, m)` where `m` is the width of the first data row. A row with a
+different width is a hard error (`inconsistent column count`). The parse is a
+pure function of verified dataset bytes, so the evidence is Deterministic.
 
 The **external cap** is a kernel invariant, not a convention:
 

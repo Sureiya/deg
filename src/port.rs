@@ -807,6 +807,13 @@ fn port_evidence(
         EvidenceKind::Absence { .. } => {
             Err("absence certificate is build- and time-scoped; re-issue it".into())
         }
+        EvidenceKind::Table { .. } => {
+            Err("table evidence is dataset-bound; revalidate it against a target dataset".into())
+        }
+        EvidenceKind::Extension { .. } => Err(
+            "extension evidence cannot be ported automatically; re-derive it for the target build"
+                .into(),
+        ),
     }
 }
 
