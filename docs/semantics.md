@@ -36,6 +36,9 @@ A ⊢ a : H(a)        if sha256(bytes(a)) = H(a)
 The kernel loads every declared artifact and computes SHA-256. If the digest
 does not match, the artifact is marked unverified, a hard error is recorded, and
 no evidence may use it. The digest is the only path from a model to bytes.
+Symbol stores and external certificate files are *inputs* rather than declared
+artifacts in v0.1; a certificate must carry the build digest, and a symbol store
+must match it, but the files themselves are not signed or content-addressed.
 
 ### 2.2 Evidence evaluation
 
@@ -67,7 +70,7 @@ The strength assignment is fixed per primitive:
 | `rate`, stationary | `Observational` |
 | `rate`, nonstationary | `Heuristic` |
 | `sample` | `Observational` |
-| `symbols`, build and type match | `Exact` |
+| `symbols`, build and type match | `Exact` (store is a trusted input) |
 | `external` | `Observational` |
 | `absence` | `Observational` |
 

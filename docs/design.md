@@ -180,8 +180,10 @@ external certificate capped at Observational.
 External certificate kinds in v0.1: `trace` (from packet field to function),
 `accesses` (field accesses), `absence`, `observability` (connection/window),
 and a generic `facts` array. The kernel checks the `build` digest and the shape,
-not the truth of the analysis. A future version can add a verified checker for a
-specific dataflow engine and promote *that* certificate class.
+not the truth of the analysis. Certificate files are inputs, not
+content-addressed artifacts in v0.1; hashing and signing them is future work.
+A future version can add a verified checker for a specific dataflow engine and
+promote *that* certificate class.
 
 ### Negative evidence
 
@@ -215,7 +217,9 @@ Speculative  <  Heuristic  <  Observational  <  Deterministic  <  Exact
 - **Deterministic** — the kernel re-derived the fact from bytes/code: a unique
   scan, exact bytes, a complete decode, a literal `div`, a forward simulation.
 - **Exact** — a cryptographic/identity anchor: the build digest appears in a
-  trusted symbol store and the symbol/type matches.
+  trusted symbol store and the symbol/type matches. The store is a *trusted
+  input* in v0.1; its own integrity/signature is a deployment assumption, not
+  something the kernel re-derives.
 
 Strength is computed by the kernel. The surface language has no syntax for
 “trust me, this is Deterministic.”
