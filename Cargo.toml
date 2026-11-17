@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "adapter"]
+resolver = "2"
+
 [package]
 name = "deg"
 version = "0.1.0"
