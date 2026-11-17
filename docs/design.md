@@ -168,6 +168,7 @@ ev e_recover := recovery(srv_rng, state: ds_state, index: 624, observed: ds_obs)
 | `recovery(rng, state, index, observed, projection)` | forward-simulates LCG / xorshift32 / xorshift128 / MT19937 from a witness state, compares outputs (optionally projected bits) to a hashed dataset | Deterministic (Heuristic for a single output) |
 | `rate(capture, opcode, clock)` | pcap timestamps, median inter-arrival, MAD-based CI, coverage, split-half stationarity | Observational (Heuristic if nonstationary) |
 | `sample(capture, opcode, field, width, endian)` | payload field extraction, histogram, coverage | Observational |
+| `samples(dataset, value, group, delim)` | CSV/TSV/whitespace dataset rows split by the kernel; per-group n, mean, median, sample sd, 95% CI emitted as milli-scaled facts | Observational |
 | `symbols(build, store)` | store build digest must match; symbols and PDB-like types compared exactly to the model | Exact |
 | `external(path, kind, build)` | certificate schema + build digest; **analysis not re-run** | Observational |
 | `absence(path, build, scope, during)` | audited absence certificate: scope inside `.text`, time window inside the capture, no listed writes | Observational |
@@ -379,6 +380,44 @@ A statistical claim is **always Observational**. The kernel certifies the
 The claim can be sealed only provisionally, with an expiry date, or at a lowered
 threshold with eyes open.
 
+#### Mean claims
+
+`mean` claims generalize certificate statistics from timing/loot to any numeric
+sample the researcher can lock into a dataset (adapterproject-style mechanics metrics):
+
+```dg
+dataset ds_atk = dataset("attack-samples.csv", sha256: "…", build: b1);
+
+ev e_atk := samples(ds_atk, value: 0, group: 1, delim: "csv");
+
+claim C_club_mean : mean(club) ~ 42.0 ± 1.2 in b1
+  provisional until "2099-12-31"
+  by e_atk require samples >= 100, confidence >= 0.95, power: 0.8, delta: 2.0;
+```
+
+`samples` evidence reads a content-addressed CSV/TSV/whitespace dataset
+(blank lines and `#` comments skipped), parses the value column as floats, and
+emits per-group statistics as milli-scaled integer facts (`samples_n`,
+`samples_mean_milli`, `samples_median_milli`, `samples_sd_milli`,
+`samples_ci_milli`, `samples_group`) plus a `Measured` payload of per-group
+mean/median/sample-sd (n-1 denominator)/95% CI half-width. Without a `group:`
+column all values form one group named `""`.
+
+For a mean claim the kernel re-checks:
+
+- the evidence is `samples(...)` and contains the claimed metric group;
+- `n` meets the `samples >=` requirement;
+- the measured mean is within `value ± eps`;
+- the 95% CI (rescaled to the requested `confidence` via the normal
+  quantile) is not wider than `eps`;
+- if `power`/`delta` are declared, the sample count reaches the required size
+  `((z₁₋ₐ/₂ + z_power)·sd/δ)²` — with `alpha` fixed at 0.05 (there is no
+  alpha requirement syntax for mean claims in v0.1). An underpowered claim is
+  a hypothesis, not a hard failure.
+
+A mean claim is always **Observational**, and seals provisionally like the
+other statistical claims.
+
 ### 9.2 Composed claims
 
 Security claims are compositions of other claims:
@@ -398,7 +437,37 @@ premise as the bottleneck. A provisional premise propagates its expiry to the
 derived claim. There is no special “security multiplier”; trust-boundary claims
 are exactly as strong as their weakest conjunct.
 
-### 9.3 Conflicts
+### 9.3 Coverage claims
+
+Audit-style questions — “33/33 opcodes identified, 64/82 packets decoded” — are
+claims over a locked universe of IDs. DeG is never the count authority: the
+dataset fixes the universe, and the premises are the claims that cover it:
+
+```dg
+dataset ds_ids = dataset("ids.txt", sha256: "…", build: b1);
+
+claim C_cov : coverage(ds_ids, target: 82) in b1
+  from P_opcode_1, P_opcode_2, …;
+```
+
+The kernel:
+
+- loads the dataset IDs (one integer per line, `0x…` hex allowed, blank/`#`
+  lines ignored, duplicates counted once);
+- requires every premise to be a sealed/provisional claim with a ground goal;
+- the first premise's goal relation defines the family (e.g. `opcode`); every
+  premise must share it, and each premise's first argument must be an ID from
+  the dataset;
+- computes `covered` from the premises' first arguments; a dataset ID without a
+  premise is reported as missing (up to 32 named, then “+K more”).
+
+The claim seals when every dataset ID is covered and the covered count equals
+`target`; a shortfall is a hypothesis (“covered 64/82, missing: …”). The
+strength is the minimum premise strength and the bottleneck is reported, like
+composed claims. The dataset is global, so the claim's build is carried but not
+enforced.
+
+### 9.4 Conflicts
 
 A uniform sample and a code-derived bias can both be “proved” while disagreeing:
 
@@ -416,7 +485,34 @@ seal manifest. An undeclared conflict is reported unresolved and blocks
 over a statistical failure to reject uniformity, because they are not the same
 kind of claim.
 
-### 9.4 Refutation
+Conflicts are not limited to the uniform/biased pattern: **any** declaration
+whose sides are two active claims (Sealed, Provisional, or Hypothesis) is
+treated as a conflict, regardless of the claim heads, and resolved by `prefer`
+or by a decision file.
+
+#### Decisions
+
+When the choice between two claims is a human call, it should be recorded like
+any other artifact — content-addressed and re-checked:
+
+```dg
+decision D_cd := decision("decisions/prefer_d.txt",
+  sha256: "8cea…", prefer: P_d, over: P_c, signer: "conflict-auditor");
+
+conflict C_dec : P_c vs P_d
+  decision D_cd
+  reason "a human decision resolves this pair";
+```
+
+The kernel re-hashes the decision file (resolved relative to the model
+directory; absolute paths allowed) at every check. A missing file or a digest
+mismatch is a hard error and makes the decision unusable: the conflict it names
+stays unresolved and blocks sealing. A decision resolves a conflict only when
+its `prefer`/`over` equal the conflict's sides in some order. The strength of
+the decision as an artifact check is Deterministic (the digest), and decisions
+are recorded in the report, the JSON output, and the lock file.
+
+### 9.5 Refutation
 
 A refutation is a successful observation that kills a hypothesis:
 
@@ -428,10 +524,17 @@ refute R_not_xorshift : algo(srv_rng, XORSHIFT128) in b1 by e_xs_refute;
 mismatches the observed dataset. The kernel checks that the refutation goal is
 `algo(rng, ALGO)` and that the evidence contains the matching `sim_fail` fact.
 A refutation is sealed at Deterministic (the mismatch is a byte-level fact) and
-marks any claim with the same goal as `refuted`. Refutation is first-class
-because eliminating wrong models is often the real work.
+marks any claim with the same goal as `refuted`.
 
-### 9.5 Obligations
+Any other ground atom can be refuted through the generic extension point: if
+the evidence emits `contradicts(ev, rel, [args…])` with the goal's relation and
+argument list, the refutation seals at the evidence's strength capped by
+Deterministic (so external certificates refute at Observational). Core
+primitives may emit `contradicts` in the future; extensions can emit it today
+through an external certificate's generic `facts` array. Refutation is
+first-class because eliminating wrong models is often the real work.
+
+### 9.6 Obligations
 
 Not everything is proved. Obligations are live, auditable gaps:
 
@@ -458,6 +561,7 @@ prevents sealing. A non-blocking obligation appears in the report and lock.
   "hypotheses": [{ "name": "C_predictable", "status": "hypothesis", … }],
   "obligations": [{ "name": "O_recheck_rate", "status": "open", … }],
   "conflicts": [{ "name": "C_loot", "preferred": "P_biased", "demoted": "C_uniform" }],
+  "decisions": [{ "name": "D_cd", "sha256": "8cea…", "ok": true }],
   "definitions": [{ "kind": "struct", "name": "Vec3", "justified": true, … }]
 }
 ```
@@ -467,6 +571,7 @@ is reproducible. `deg seal` by default records hypotheses honestly; `--strict`
 refuses to write a lock unless every claim seals. Sealing refuses on:
 
 - artifact digest mismatch;
+- decision file missing or digest mismatch;
 - failed evidence, failed proof, failed measurement, or a refuted claim;
 - an open blocking obligation;
 - an unresolved conflict.
@@ -723,6 +828,10 @@ should be conservative.
 | Recovery witnesses, projections, refutation by mismatch | ✅ |
 | Rate/period claims, coverage, CI, stationarity | ✅ |
 | Uniform claims, chi-square, power check, statistical cap | ✅ |
+| Samples evidence, mean claims, per-group CI and power | ✅ |
+| Coverage claims over locked ID datasets | ✅ |
+| Generic conflicts, hash-pinned decision files | ✅ |
+| Generalized refutation via `contradicts` facts | ✅ |
 | Datalog facts/rules, maximin, provenance, derivations | ✅ |
 | Proofs, composed claims, bottlenecks, conflicts, obligations | ✅ |
 | Exact symbol/type store | ✅ (definitions/anchors) |

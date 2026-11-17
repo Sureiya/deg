@@ -152,6 +152,27 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def make_attack_samples(path: Path) -> None:
+    """240 rows of synthetic 'mechanics metric' samples.
+
+    Two groups ("club" and "sword") alternate; both are drawn from N(42, 2).
+    The generator is deterministic so the mean/sd/CI in the stats example
+    stay reproducible.
+    """
+    r = random.Random(0xD2E9)
+    rows = []
+    for i in range(240):
+        group = "club" if i % 2 == 0 else "sword"
+        rows.append(f"{r.gauss(42.0, 2.0):.4f},{group}")
+    path.write_text("\n".join(rows) + "\n")
+
+
+def make_id_fixtures() -> None:
+    (FIX / "ids.bin").write_bytes(bytes([0x01, 0x02, 0x03, 0x04, 0x05]))
+    (FIX / "ids.txt").write_text("# coverage universe: five opcode ids\n" + "".join(f"{i}\n" for i in range(1, 6)))
+    (FIX / "ids6.txt").write_text("# six ids: id 6 is not covered by any premise\n" + "".join(f"{i}\n" for i in range(1, 7)))
+
+
 def main() -> None:
     make_binary(FIX / "game-b1.bin", b"b1", 0, 0xEFC60000)
     make_binary(FIX / "game-b2.bin", b"b2", 0x80, 0xEFC60001)
@@ -243,6 +264,24 @@ def main() -> None:
         )
         + "\n"
     )
+    (FIX / "contradicts.json").write_text(
+        json.dumps(
+            {
+                "kind": "contradicts",
+                "build": b1,
+                "tool": "fixture-auditor 0.1",
+                "note": "A generic contradiction fact: the auditor checked that can_predict(conn_7) does not hold.",
+                "facts": [
+                    {"rel": "contradicts", "args": ["e_contra", "can_predict", ["conn_7"]]}
+                ],
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+
+    make_attack_samples(FIX / "attack-samples.csv")
+    make_id_fixtures()
 
     manifest = {
         "builds": {"b1": b1, "b2": b2},
@@ -255,6 +294,10 @@ def main() -> None:
             "mt-state-b2.txt": sha(FIX / "mt-state-b2.txt"),
             "mt-observed-b2.txt": sha(FIX / "mt-observed-b2.txt"),
             "xs-state.txt": sha(FIX / "xs-state.txt"),
+            "attack-samples.csv": sha(FIX / "attack-samples.csv"),
+            "ids.bin": sha(FIX / "ids.bin"),
+            "ids.txt": sha(FIX / "ids.txt"),
+            "ids6.txt": sha(FIX / "ids6.txt"),
         },
     }
     (FIX / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

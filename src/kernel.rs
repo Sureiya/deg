@@ -16,6 +16,8 @@ use crate::stats;
 use crate::strength::Strength;
 use crate::value::{Lit, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +25,8 @@ pub enum ClaimKind {
     Proof,
     Period,
     Uniform,
+    Mean,
+    Coverage,
     Derived,
     Refute,
 }
@@ -33,6 +37,8 @@ impl ClaimKind {
             ClaimKind::Proof => "proof",
             ClaimKind::Period => "period",
             ClaimKind::Uniform => "uniform",
+            ClaimKind::Mean => "mean",
+            ClaimKind::Coverage => "coverage",
             ClaimKind::Derived => "derived",
             ClaimKind::Refute => "refutation",
         }
@@ -86,6 +92,15 @@ pub struct ClaimResult {
     pub conflict_with: Vec<String>,
     pub refuted_by: Option<String>,
     pub measured: Option<String>,
+    pub coverage: Option<CoverageStats>,
+}
+
+/// Structured result of a coverage claim, mirrored into JSON and the lock.
+#[derive(Debug, Clone)]
+pub struct CoverageStats {
+    pub covered: u64,
+    pub target: u64,
+    pub missing: Vec<i128>,
 }
 
 impl ClaimResult {
@@ -107,6 +122,7 @@ impl ClaimResult {
             conflict_with: Vec::new(),
             refuted_by: None,
             measured: None,
+            coverage: None,
         }
     }
 }
@@ -144,7 +160,21 @@ pub struct ConflictResult {
     pub preferred: Option<String>,
     pub demoted: Option<String>,
     pub reason: Option<String>,
+    pub decision: Option<String>,
     pub resolved: bool,
+}
+
+/// A hash-verified human decision file. `ok` is true only when the file was
+/// readable and its digest matched the declaration; a failed decision cannot
+/// resolve a conflict.
+#[derive(Debug, Clone)]
+pub struct DecisionResult {
+    pub name: String,
+    pub sha256: String,
+    pub ok: bool,
+    pub signer: Option<String>,
+    pub prefer: String,
+    pub over: String,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +207,7 @@ pub struct CheckReport {
     pub claims: Vec<ClaimResult>,
     pub obligations: Vec<ObligationResult>,
     pub conflicts: Vec<ConflictResult>,
+    pub decisions: Vec<DecisionResult>,
     pub definitions: Vec<DefinitionAudit>,
     pub proof_stores: BTreeMap<String, FactStore>,
     pub seal_threshold: Strength,
@@ -285,6 +316,10 @@ pub fn check(index: &ModelIndex, artifacts: &ArtifactSet) -> CheckReport {
         }
     }
 
+    // Decisions are hash-pinned files: verify them before conflicts are
+    // resolved, since a digest mismatch makes a decision unusable.
+    let decisions = verify_decisions(index, artifacts, &mut errors);
+
     let all_rules = match index.all_rules() {
         Ok(r) => r,
         Err(e) => {
@@ -373,14 +408,20 @@ pub fn check(index: &ModelIndex, artifacts: &ArtifactSet) -> CheckReport {
         ));
     }
 
-    // 4. Conflicts between uniform and biased claims.
-    let conflicts = resolve_conflicts(index, &mut claims, &mut errors, &mut warnings);
+    // 4. Conflicts between active claims (generic pairs, and the uniform-vs-
+    // biased auto-detection), resolved by `prefer` or a verified `decision`.
+    let conflicts = resolve_conflicts(index, &mut claims, &mut warnings, &decisions);
 
-    // 5. Derived claims, after base claims and demotions.
+    // 5. Derived and coverage claims, after base claims and demotions.
     let mut pending: Vec<&ClaimDecl> = index
         .claims
         .values()
-        .filter(|c| matches!(c.body, ClaimBody::Derived { .. }))
+        .filter(|c| {
+            matches!(
+                c.body,
+                ClaimBody::Derived { .. } | ClaimBody::Coverage { .. }
+            )
+        })
         .collect();
     let mut made_progress = true;
     while made_progress {
@@ -388,11 +429,17 @@ pub fn check(index: &ModelIndex, artifacts: &ArtifactSet) -> CheckReport {
         let mut still = Vec::new();
         for claim in pending {
             let refs = match &claim.body {
-                ClaimBody::Derived { from } => from,
+                ClaimBody::Derived { from } | ClaimBody::Coverage { from } => from,
                 _ => unreachable!(),
             };
             if refs.iter().all(|r| claims.iter().any(|c| &c.name == r)) {
-                let result = check_derived_claim(index, claim, &claims);
+                let result = match &claim.body {
+                    ClaimBody::Derived { .. } => check_derived_claim(index, claim, &claims),
+                    ClaimBody::Coverage { .. } => {
+                        check_coverage_claim(index, claim, &claims, artifacts)
+                    }
+                    _ => unreachable!(),
+                };
                 if result.status == ClaimStatus::Failed {
                     errors.push(format!(
                         "claim {} failed: {}",
@@ -409,10 +456,7 @@ pub fn check(index: &ModelIndex, artifacts: &ArtifactSet) -> CheckReport {
         pending = still;
     }
     for claim in pending {
-        errors.push(format!(
-            "derived claim {} has unresolved premises",
-            claim.name
-        ));
+        errors.push(format!("claim {} has unresolved premises", claim.name));
     }
 
     // 6. Obligations.
@@ -435,6 +479,7 @@ pub fn check(index: &ModelIndex, artifacts: &ArtifactSet) -> CheckReport {
         claims,
         obligations,
         conflicts,
+        decisions,
         definitions,
         proof_stores,
         seal_threshold: index.seal_threshold(),
@@ -607,6 +652,8 @@ fn check_direct_claim(
     let kind = match &claim.head {
         ClaimHead::Period { .. } => ClaimKind::Period,
         ClaimHead::Uniform { .. } => ClaimKind::Uniform,
+        ClaimHead::Mean { .. } => ClaimKind::Mean,
+        ClaimHead::Coverage { .. } => ClaimKind::Coverage,
         ClaimHead::Rel(_) => ClaimKind::Derived,
     };
     let mut result = ClaimResult::base(&claim.name, kind, &claim.build, claim.head.display());
@@ -867,6 +914,96 @@ fn check_direct_claim(
             result.status = status;
             result.note = note;
         }
+        ClaimHead::Mean { metric, value, eps } => {
+            let group = match &outcome.measured {
+                Some(Measured::Samples { groups }) => match groups.get(metric) {
+                    Some(g) => g.clone(),
+                    None => {
+                        result.status = ClaimStatus::Failed;
+                        let available: Vec<&str> = groups.keys().map(String::as_str).collect();
+                        result.error = Some(format!(
+                            "samples evidence `{ev_name}` has no group `{metric}`; available: {}",
+                            if available.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                available
+                                    .iter()
+                                    .map(|g| format!("`{g}`"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            }
+                        ));
+                        return result;
+                    }
+                },
+                _ => {
+                    result.status = ClaimStatus::Failed;
+                    result.error = Some("mean claim requires `samples(...)` evidence".into());
+                    return result;
+                }
+            };
+            let req = Requirements::from(requires.as_slice());
+            let n = group.n;
+            result.measured = Some(format!(
+                "n={n} mean={:.3} median={:.3} sd={:.3} ci95={:.3}",
+                group.mean, group.median, group.sd, group.ci95
+            ));
+            if req.samples > 0 && n < req.samples {
+                result.status = ClaimStatus::Hypothesis;
+                result.strength = Some(Strength::Observational);
+                result.note = Some(format!("only {n} samples; requirement is {}", req.samples));
+                return result;
+            }
+            if (group.mean - *value).abs() > *eps {
+                result.status = ClaimStatus::Failed;
+                result.error = Some(format!(
+                    "measured mean {:.3} differs from claimed {value} by more than {eps}",
+                    group.mean
+                ));
+                return result;
+            }
+            // Rescale the 95% CI to the requested confidence.
+            let z = stats::normal_quantile(1.0 - (1.0 - req.confidence) / 2.0);
+            let ci = group.ci95 * z / 1.96;
+            if ci > *eps {
+                result.status = ClaimStatus::Failed;
+                result.error = Some(format!(
+                    "claimed tolerance {eps} is tighter than the evidence CI ±{ci:.3}"
+                ));
+                return result;
+            }
+            // Power/delta when declared: alpha is fixed at 0.05 for mean
+            // claims in v0.1 (there is no alpha requirement syntax for them).
+            if let Some(delta) = req.delta {
+                if let Some(power) = req.power {
+                    let z_alpha = stats::normal_quantile(1.0 - 0.05 / 2.0);
+                    let z_power = stats::normal_quantile(power);
+                    let required_n = ((z_alpha + z_power) * group.sd / delta).powi(2);
+                    if (n as f64) < required_n {
+                        result.status = ClaimStatus::Hypothesis;
+                        result.strength = Some(Strength::Observational);
+                        result.note = Some(format!(
+                            "underpowered: n={n}, required n≈{required_n:.0} to detect delta={delta} at power={power}"
+                        ));
+                        return result;
+                    }
+                }
+            }
+            result.strength = Some(Strength::Observational);
+            let (status, note) = seal_status(
+                Strength::Observational,
+                index.seal_threshold(),
+                claim.provisional_until.as_deref(),
+                None,
+            );
+            result.status = status;
+            result.note = note;
+        }
+        ClaimHead::Coverage { .. } => {
+            result.status = ClaimStatus::Failed;
+            result.error =
+                Some("coverage claims must use `from <claim,...>`, not `by <evidence>`".into());
+        }
         ClaimHead::Rel(_) => {
             result.status = ClaimStatus::Failed;
             result.error =
@@ -1014,6 +1151,326 @@ pub fn check_derived_claim(
     result
 }
 
+/// Verify every declared decision file: resolve the path against the model
+/// directory (absolute paths are allowed), read the bytes, and compare the
+/// SHA-256 to the declared digest. A missing file or a digest mismatch is a
+/// hard error and makes the decision unusable for conflict resolution.
+fn verify_decisions(
+    index: &ModelIndex,
+    artifacts: &ArtifactSet,
+    errors: &mut Vec<String>,
+) -> Vec<DecisionResult> {
+    let mut out = Vec::new();
+    for (name, d) in &index.decisions {
+        let p = Path::new(&d.path);
+        let full = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            artifacts.model_dir.join(p)
+        };
+        let (sha256, ok) = match fs::read(&full) {
+            Ok(bytes) => {
+                let actual = crate::sha256::sha256_hex(&bytes);
+                let ok = actual.eq_ignore_ascii_case(&d.sha256);
+                if !ok {
+                    errors.push(format!(
+                        "decision {name}: digest mismatch (declared {}, actual {actual})",
+                        d.sha256.to_ascii_lowercase()
+                    ));
+                }
+                (actual, ok)
+            }
+            Err(e) => {
+                errors.push(format!(
+                    "decision {name}: cannot read {}: {e}",
+                    full.display()
+                ));
+                (String::new(), false)
+            }
+        };
+        out.push(DecisionResult {
+            name: name.clone(),
+            sha256,
+            ok,
+            signer: d.signer.clone(),
+            prefer: d.prefer.clone(),
+            over: d.over.clone(),
+        });
+    }
+    out
+}
+
+/// Check a coverage claim: how many IDs of a locked dataset are covered by
+/// sealed claims of one relation family.
+///
+/// DeG is not the count authority — the dataset fixes the universe of IDs and
+/// each premise must be a sealed/provisional ground claim whose first
+/// argument is an ID from the dataset. The claim seals when every dataset ID
+/// is covered and the number of covered IDs equals the declared target.
+fn check_coverage_claim(
+    index: &ModelIndex,
+    claim: &ClaimDecl,
+    claims: &[ClaimResult],
+    artifacts: &ArtifactSet,
+) -> ClaimResult {
+    let (dataset_name, target) = match &claim.head {
+        ClaimHead::Coverage { dataset, target } => (dataset.clone(), *target),
+        _ => {
+            let mut result = ClaimResult::base(
+                &claim.name,
+                ClaimKind::Coverage,
+                &claim.build,
+                claim.head.display(),
+            );
+            result.status = ClaimStatus::Failed;
+            result.error = Some("not a coverage claim".into());
+            return result;
+        }
+    };
+    let mut result = ClaimResult::base(
+        &claim.name,
+        ClaimKind::Coverage,
+        &claim.build,
+        claim.head.display(),
+    );
+    result.provisional_until = claim.provisional_until.clone();
+    let refs = match &claim.body {
+        ClaimBody::Coverage { from } => from.clone(),
+        _ => {
+            result.status = ClaimStatus::Failed;
+            result.error = Some("coverage claim has no `from <claim,...>` body".into());
+            return result;
+        }
+    };
+
+    // The universe of IDs: one integer per line, hex `0x…` allowed, blank
+    // lines and `#` comments ignored. Duplicates count once.
+    let text = match artifacts.dataset_text(&dataset_name) {
+        Ok(t) => t,
+        Err(e) => {
+            result.status = ClaimStatus::Failed;
+            result.error = Some(e);
+            return result;
+        }
+    };
+    let mut ids = BTreeSet::new();
+    let mut duplicates = 0usize;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let id = match parse_dataset_id(line) {
+            Some(v) => v,
+            None => {
+                result.status = ClaimStatus::Failed;
+                result.error = Some(format!(
+                    "dataset `{dataset_name}` contains an invalid id {line:?}"
+                ));
+                return result;
+            }
+        };
+        if !ids.insert(id) {
+            duplicates += 1;
+        }
+    }
+    if ids.is_empty() {
+        result.status = ClaimStatus::Failed;
+        result.error = Some(format!("dataset `{dataset_name}` contains no ids"));
+        return result;
+    }
+
+    let mut premises = Vec::new();
+    for r in &refs {
+        match claims.iter().find(|c| &c.name == r) {
+            Some(c) => premises.push(c),
+            None => {
+                result.status = ClaimStatus::Failed;
+                result.error = Some(format!("unknown premise `{r}`"));
+                return result;
+            }
+        }
+    }
+
+    // Every premise must be a sealed/provisional claim with a ground goal;
+    // the first premise's relation defines the family.
+    let mut min_strength = Strength::Exact;
+    let mut bottleneck = None;
+    let mut covered: BTreeSet<i128> = BTreeSet::new();
+    let mut family: Option<String> = None;
+    let mut all_provisional = true;
+    let mut provisional_until: Option<String> = None;
+    for p in &premises {
+        if !p.status.usable() {
+            result.status = ClaimStatus::Failed;
+            result.error = Some(format!("premise `{}` is {}", p.name, p.status.as_str()));
+            result.premises = refs.clone();
+            return result;
+        }
+        let Some(key) = &p.goal_key else {
+            result.status = ClaimStatus::Failed;
+            result.error = Some(format!("premise `{}` has no ground goal", p.name));
+            result.premises = refs.clone();
+            return result;
+        };
+        match &family {
+            None => family = Some(key.rel.clone()),
+            Some(f) => {
+                if f != &key.rel {
+                    result.status = ClaimStatus::Failed;
+                    result.error = Some(format!(
+                        "premise `{}` proves `{}`, but the family is `{}`",
+                        p.name, key.rel, f
+                    ));
+                    result.premises = refs.clone();
+                    return result;
+                }
+            }
+        }
+        let Some(Value::Int(id)) = key.args.first() else {
+            result.status = ClaimStatus::Failed;
+            result.error = Some(format!(
+                "premise `{}` goal {} has no integer first argument",
+                p.name,
+                key.display()
+            ));
+            result.premises = refs.clone();
+            return result;
+        };
+        if !ids.contains(id) {
+            result.status = ClaimStatus::Failed;
+            result.error = Some(format!(
+                "claim `{}` covers id {id} not in dataset `{dataset_name}`",
+                p.name
+            ));
+            result.premises = refs.clone();
+            return result;
+        }
+        covered.insert(*id);
+        let s = p.strength.unwrap_or(Strength::Speculative);
+        if s < min_strength {
+            min_strength = s;
+            bottleneck = Some(p.name.clone());
+        } else if bottleneck.is_none() {
+            bottleneck = Some(p.name.clone());
+        }
+        if p.status != ClaimStatus::Provisional {
+            all_provisional = false;
+        } else if let Some(exp) = &p.provisional_until {
+            provisional_until = match provisional_until {
+                None => Some(exp.clone()),
+                Some(cur) => {
+                    if date_key(exp) < date_key(&cur) {
+                        Some(exp.clone())
+                    } else {
+                        Some(cur)
+                    }
+                }
+            };
+        }
+    }
+
+    result.strength = Some(min_strength);
+    result.premises = refs.clone();
+    result.support = refs.iter().cloned().collect();
+    result.bottleneck = bottleneck;
+    result.provisional_until = provisional_until.clone().or(result.provisional_until);
+    result.measured = Some(format!(
+        "dataset {dataset_name}: {} distinct id(s), {duplicates} duplicate(s) deduplicated",
+        ids.len()
+    ));
+
+    let missing: Vec<i128> = ids
+        .iter()
+        .filter(|i| !covered.contains(i))
+        .copied()
+        .collect();
+    let covered_n = covered.len() as u64;
+    result.coverage = Some(CoverageStats {
+        covered: covered_n,
+        target,
+        missing: missing.clone(),
+    });
+
+    if !missing.is_empty() {
+        result.status = ClaimStatus::Hypothesis;
+        result.note = Some(format!(
+            "covered {covered_n}/{target}; missing: {}",
+            format_missing_ids(&missing)
+        ));
+        return result;
+    }
+    if covered_n != target {
+        result.status = ClaimStatus::Hypothesis;
+        result.note = Some(format!("covered {covered_n}/{target} (target not met)"));
+        return result;
+    }
+    if min_strength < index.seal_threshold() {
+        if provisional_until.is_some() && min_strength >= Strength::Observational {
+            result.status = ClaimStatus::Provisional;
+            result.note = Some(format!(
+                "provisional via premise{}; expires {}{}",
+                if premises.len() > 1 { "s" } else { "" },
+                provisional_until.clone().unwrap_or_else(|| "never".into()),
+                provisional_until
+                    .as_deref()
+                    .map(|d| if provisional_expired(d) {
+                        " (EXPIRED)"
+                    } else {
+                        ""
+                    })
+                    .unwrap_or("")
+            ));
+            if provisional_until
+                .as_deref()
+                .map(provisional_expired)
+                .unwrap_or(false)
+            {
+                result.status = ClaimStatus::Hypothesis;
+                result.note = Some("provisional premise has expired".into());
+            }
+        } else {
+            result.status = ClaimStatus::Hypothesis;
+            result.note = Some(format!(
+                "minimum premise strength {min_strength} is below the seal threshold {}",
+                index.seal_threshold()
+            ));
+        }
+        return result;
+    }
+    result.status = if all_provisional {
+        ClaimStatus::Provisional
+    } else {
+        ClaimStatus::Sealed
+    };
+    result
+}
+
+/// Parse one dataset id: decimal or `0x…` hex, non-negative.
+fn parse_dataset_id(s: &str) -> Option<i128> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok().map(|v| v as i128)
+    } else {
+        s.parse().ok()
+    }
+}
+
+/// Render missing ids compactly: up to 32 as hex, then "+K more".
+fn format_missing_ids(missing: &[i128]) -> String {
+    const LIMIT: usize = 32;
+    let shown: Vec<String> = missing
+        .iter()
+        .take(LIMIT)
+        .map(|id| format!("{id:#x}"))
+        .collect();
+    if missing.len() > LIMIT {
+        format!("{}, +{} more", shown.join(", "), missing.len() - LIMIT)
+    } else {
+        shown.join(", ")
+    }
+}
+
 fn check_refute(
     index: &ModelIndex,
     refute: &RefuteDecl,
@@ -1050,37 +1507,179 @@ fn check_refute(
         ));
         return result;
     }
-    if key.rel != "algo" || key.args.len() != 2 {
-        result.status = ClaimStatus::Failed;
-        result.error = Some(format!(
-            "refutation currently supports `algo(rng, ALGO)` goals, not {}",
-            key.display()
-        ));
+    if key.rel == "algo" && key.args.len() == 2 {
+        // RNG path: a `sim_fail` fact from recovery evidence contradicts the
+        // declared algorithm.
+        let rng = &key.args[0];
+        let algo = &key.args[1];
+        let contradicts = outcome.facts.iter().any(|(rel, args)| {
+            rel == "sim_fail" && args.len() == 3 && &args[1] == rng && &args[2] == algo
+        });
+        if contradicts {
+            result.status = ClaimStatus::Sealed;
+            result.strength = Some(Strength::Deterministic);
+            result.note = Some("the simulation witness contradicts the goal".into());
+        } else {
+            result.status = ClaimStatus::Failed;
+            result.error =
+                Some("evidence does not contain a `sim_fail` fact matching this goal".into());
+        }
         return result;
     }
-    let rng = &key.args[0];
-    let algo = &key.args[1];
-    let contradicts = outcome.facts.iter().any(|(rel, args)| {
-        rel == "sim_fail" && args.len() == 3 && &args[1] == rng && &args[2] == algo
-    });
-    if contradicts {
-        result.status = ClaimStatus::Sealed;
-        result.strength = Some(Strength::Deterministic);
-        result.note = Some("the simulation witness contradicts the goal".into());
-    } else {
-        result.status = ClaimStatus::Failed;
-        result.error =
-            Some("evidence does not contain a `sim_fail` fact matching this goal".into());
+
+    // General path: any ground goal can be refuted when the evidence carries
+    // a `contradicts(ev, rel, [args…])` fact whose relation and argument
+    // list equal the goal's. Core primitives may emit it in future;
+    // extensions can emit it through external certificate facts today.
+    let mut available: Vec<String> = Vec::new();
+    for (rel, args) in &outcome.facts {
+        if rel != "contradicts" || args.len() != 3 {
+            continue;
+        }
+        let (Some(Value::Sym(ev)), Some(Value::Sym(rel_name)), Some(Value::List(vals))) =
+            (args.first(), args.get(1), args.get(2))
+        else {
+            continue;
+        };
+        let shown = format!(
+            "contradicts({ev}, {rel_name}, [{}])",
+            vals.iter()
+                .map(Value::display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        if rel_name == &key.rel && *vals == key.args {
+            result.status = ClaimStatus::Sealed;
+            // The evidence emitted the mismatch as a checked fact, so the
+            // refutation is never stronger than that evidence.
+            result.strength = Some(outcome.strength.min(Strength::Deterministic));
+            result.note =
+                Some("the evidence carries a `contradicts` fact matching the goal".into());
+            return result;
+        }
+        available.push(shown);
     }
+    result.status = ClaimStatus::Failed;
+    result.error = Some(if available.is_empty() {
+        "evidence does not contain a `contradicts` fact matching this goal".into()
+    } else {
+        format!(
+            "evidence does not contain a `contradicts` fact matching this goal; available: {}",
+            available.join("; ")
+        )
+    });
     result
 }
 
 fn resolve_conflicts(
     index: &ModelIndex,
     claims: &mut [ClaimResult],
-    errors: &mut Vec<String>,
     warnings: &mut Vec<String>,
+    decisions: &[DecisionResult],
 ) -> Vec<ConflictResult> {
+    let mut out = Vec::new();
+
+    // A claim is "active" when it is Sealed, Provisional, or Hypothesis;
+    // only active claims take part in conflicts.
+    fn active(claims: &[ClaimResult], name: &str) -> bool {
+        claims
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| {
+                matches!(
+                    c.status,
+                    ClaimStatus::Sealed | ClaimStatus::Provisional | ClaimStatus::Hypothesis
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    // Resolve a declared pair via `prefer` or a verified `decision`. Returns
+    // the name to prefer, or None when the conflict cannot be resolved.
+    let resolution = |d: &ConflictDecl| -> Option<String> {
+        if let Some(p) = &d.prefer {
+            return Some(p.clone());
+        }
+        if let Some(dname) = &d.decision {
+            let decision = decisions.iter().find(|r| &r.name == dname && r.ok)?;
+            if (decision.prefer == d.left && decision.over == d.right)
+                || (decision.prefer == d.right && decision.over == d.left)
+            {
+                return Some(decision.prefer.clone());
+            }
+        }
+        None
+    };
+
+    // (b) Generic conflicts: any declared pair whose sides are two active
+    // claims conflicts, regardless of claim heads. This covers the
+    // uniform/biased pairs when a declaration names them, and any other pair
+    // the researcher declares.
+    for d in &index.conflicts {
+        if !active(claims, &d.left) || !active(claims, &d.right) {
+            // (c) A declaration that does not name two active claims is a
+            // warning, exactly as before.
+            warnings.push(format!(
+                "conflict declaration `{}` does not match two active claims",
+                d.name
+            ));
+            continue;
+        }
+        match resolution(d) {
+            Some(pref) => {
+                let demoted = if pref == d.left { &d.right } else { &d.left };
+                if let Some(c) = claims.iter_mut().find(|c| &c.name == demoted) {
+                    if matches!(c.status, ClaimStatus::Sealed | ClaimStatus::Provisional) {
+                        c.status = ClaimStatus::Hypothesis;
+                        c.note = Some(format!(
+                            "demoted by conflict {}{}",
+                            d.name,
+                            d.reason
+                                .as_ref()
+                                .map(|r| format!(": {r}"))
+                                .unwrap_or_default()
+                        ));
+                        c.conflict_with.push(pref.clone());
+                    }
+                }
+                out.push(ConflictResult {
+                    name: d.name.clone(),
+                    left: d.left.clone(),
+                    right: d.right.clone(),
+                    preferred: Some(pref),
+                    demoted: Some(demoted.clone()),
+                    reason: d.reason.clone(),
+                    decision: d.decision.clone(),
+                    resolved: true,
+                });
+            }
+            None => {
+                out.push(ConflictResult {
+                    name: d.name.clone(),
+                    left: d.left.clone(),
+                    right: d.right.clone(),
+                    preferred: None,
+                    demoted: None,
+                    reason: d.reason.clone(),
+                    decision: d.decision.clone(),
+                    resolved: false,
+                });
+                match (&d.prefer, &d.decision) {
+                    (None, None) => warnings.push(format!(
+                        "conflict between `{}` and `{}` has no `prefer` clause",
+                        d.left, d.right
+                    )),
+                    (_, Some(dname)) => warnings.push(format!(
+                        "decision `{dname}` does not resolve conflict `{}` between `{}` and `{}`",
+                        d.name, d.left, d.right
+                    )),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // (a) Auto-detected uniform/biased pairs that no declaration names.
     let mut uniform: Vec<(String, String)> = Vec::new();
     let mut biased: Vec<(String, String)> = Vec::new();
     for c in claims.iter() {
@@ -1095,106 +1694,36 @@ fn resolve_conflicts(
             }
         }
     }
-
-    let mut out = Vec::new();
     for (u_name, u_dist) in &uniform {
         for (b_name, b_dist) in &biased {
             if u_dist != b_dist || u_name == b_name {
                 continue;
             }
-            let u_status = claims.iter().find(|c| &c.name == u_name).map(|c| c.status);
-            let b_status = claims.iter().find(|c| &c.name == b_name).map(|c| c.status);
-            if !matches!(
-                u_status,
-                Some(ClaimStatus::Sealed | ClaimStatus::Provisional | ClaimStatus::Hypothesis)
-            ) {
+            if !active(claims, u_name) || !active(claims, b_name) {
                 continue;
             }
-            if !matches!(
-                b_status,
-                Some(ClaimStatus::Sealed | ClaimStatus::Provisional | ClaimStatus::Hypothesis)
-            ) {
-                continue;
-            }
-            let decl = index.conflicts.iter().find(|d| {
+            let declared = index.conflicts.iter().any(|d| {
                 (d.left == *u_name && d.right == *b_name)
                     || (d.left == *b_name && d.right == *u_name)
             });
-            let name = decl
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| format!("auto:{u_name}~{b_name}"));
-            match decl {
-                Some(d) => match &d.prefer {
-                    Some(pref) => {
-                        let demoted = if pref == u_name { b_name } else { u_name };
-                        if let Some(c) = claims.iter_mut().find(|c| &c.name == demoted) {
-                            if matches!(c.status, ClaimStatus::Sealed | ClaimStatus::Provisional) {
-                                c.status = ClaimStatus::Hypothesis;
-                                c.note = Some(format!(
-                                    "demoted by conflict {}{}",
-                                    d.name,
-                                    d.reason
-                                        .as_ref()
-                                        .map(|r| format!(": {r}"))
-                                        .unwrap_or_default()
-                                ));
-                                c.conflict_with.push(pref.clone());
-                            }
-                        }
-                        out.push(ConflictResult {
-                            name,
-                            left: u_name.clone(),
-                            right: b_name.clone(),
-                            preferred: Some(pref.clone()),
-                            demoted: Some(demoted.clone()),
-                            reason: d.reason.clone(),
-                            resolved: true,
-                        });
-                    }
-                    None => {
-                        out.push(ConflictResult {
-                            name,
-                            left: u_name.clone(),
-                            right: b_name.clone(),
-                            preferred: None,
-                            demoted: None,
-                            reason: d.reason.clone(),
-                            resolved: false,
-                        });
-                        warnings.push(format!(
-                            "conflict between `{u_name}` and `{b_name}` has no `prefer` clause"
-                        ));
-                    }
-                },
-                None => {
-                    out.push(ConflictResult {
-                        name,
-                        left: u_name.clone(),
-                        right: b_name.clone(),
-                        preferred: None,
-                        demoted: None,
-                        reason: None,
-                        resolved: false,
-                    });
-                    warnings.push(format!(
-                        "uniform `{u_name}` and biased `{b_name}` conflict; declare a `conflict` block with `prefer`"
-                    ));
-                }
+            if declared {
+                continue;
             }
-        }
-    }
-    for d in &index.conflicts {
-        if !out
-            .iter()
-            .any(|c| c.name == d.name || (c.left == d.left && c.right == d.right))
-        {
+            out.push(ConflictResult {
+                name: format!("auto:{u_name}~{b_name}"),
+                left: u_name.clone(),
+                right: b_name.clone(),
+                preferred: None,
+                demoted: None,
+                reason: None,
+                decision: None,
+                resolved: false,
+            });
             warnings.push(format!(
-                "conflict declaration `{}` does not match two active claims",
-                d.name
+                "uniform `{u_name}` and biased `{b_name}` conflict; declare a `conflict` block with `prefer`"
             ));
         }
     }
-    let _ = errors;
     out
 }
 
@@ -1513,6 +2042,14 @@ pub fn lock_json(index: &ModelIndex, artifacts: &ArtifactSet, report: &CheckRepo
         if let Some(until) = &c.provisional_until {
             m.insert("provisional_until".into(), Json::Str(until.clone()));
         }
+        if let Some(cov) = &c.coverage {
+            m.insert("covered".into(), Json::Num(cov.covered as f64));
+            m.insert("target".into(), Json::Num(cov.target as f64));
+            m.insert(
+                "missing".into(),
+                Json::Arr(cov.missing.iter().map(|id| Json::Num(*id as f64)).collect()),
+            );
+        }
         match c.status {
             ClaimStatus::Sealed | ClaimStatus::Provisional => {
                 m.insert("status".into(), Json::Str(c.status.as_str().into()));
@@ -1558,9 +2095,27 @@ pub fn lock_json(index: &ModelIndex, artifacts: &ArtifactSet, report: &CheckRepo
         if let Some(d) = &c.demoted {
             m.insert("demoted".into(), Json::Str(d.clone()));
         }
+        if let Some(d) = &c.decision {
+            m.insert("decision".into(), Json::Str(d.clone()));
+        }
         cons.push(Json::Obj(m));
     }
     root.insert("conflicts".into(), Json::Arr(cons));
+
+    let mut decs = Vec::new();
+    for d in &report.decisions {
+        let mut m = BTreeMap::new();
+        m.insert("name".into(), Json::Str(d.name.clone()));
+        m.insert("sha256".into(), Json::Str(d.sha256.clone()));
+        m.insert("ok".into(), Json::Bool(d.ok));
+        m.insert("prefer".into(), Json::Str(d.prefer.clone()));
+        m.insert("over".into(), Json::Str(d.over.clone()));
+        if let Some(s) = &d.signer {
+            m.insert("signer".into(), Json::Str(s.clone()));
+        }
+        decs.push(Json::Obj(m));
+    }
+    root.insert("decisions".into(), Json::Arr(decs));
 
     let mut defs = Vec::new();
     for d in &report.definitions {
@@ -1581,4 +2136,284 @@ pub fn lock_json(index: &ModelIndex, artifacts: &ArtifactSet, report: &CheckRepo
         Json::Num(artifacts.items.len() as f64),
     );
     Json::Obj(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::evidence::{EvidenceOutcome, GroupStats};
+    use crate::lexer::Span;
+
+    fn empty_index() -> ModelIndex {
+        ModelIndex {
+            path: "test.dg".into(),
+            builds: BTreeMap::new(),
+            captures: BTreeMap::new(),
+            dumps: BTreeMap::new(),
+            datasets: BTreeMap::new(),
+            clocks: BTreeMap::new(),
+            structs: BTreeMap::new(),
+            packets: BTreeMap::new(),
+            fns: BTreeMap::new(),
+            rngs: BTreeMap::new(),
+            dists: BTreeMap::new(),
+            evidence: BTreeMap::new(),
+            rules: BTreeMap::new(),
+            proofs: BTreeMap::new(),
+            claims: BTreeMap::new(),
+            conflicts: Vec::new(),
+            decisions: BTreeMap::new(),
+            obligations: Vec::new(),
+            refutes: Vec::new(),
+            ports: Vec::new(),
+            pragmas: BTreeMap::new(),
+            build_names: BTreeSet::new(),
+            stdlib_rule_names: BTreeSet::new(),
+        }
+    }
+
+    fn span() -> Span {
+        Span::new(1, 1, 0)
+    }
+
+    fn mean_claim(metric: &str, value: f64, eps: f64, requires: Vec<Requirement>) -> ClaimDecl {
+        ClaimDecl {
+            name: "C".into(),
+            head: ClaimHead::Mean {
+                metric: metric.into(),
+                value,
+                eps,
+            },
+            build: "b1".into(),
+            during: None,
+            body: ClaimBody::Direct {
+                evidence: "e".into(),
+                requires,
+            },
+            provisional_until: Some("2099-12-31".into()),
+            span: span(),
+        }
+    }
+
+    fn samples_outcome(groups: BTreeMap<String, GroupStats>) -> BTreeMap<String, EvidenceOutcome> {
+        let mut out = EvidenceOutcome::new("e", "samples", Strength::Observational, "ok");
+        out.measured = Some(Measured::Samples { groups });
+        let mut map = BTreeMap::new();
+        map.insert("e".to_string(), out);
+        map
+    }
+
+    fn samples_evidence_index() -> ModelIndex {
+        let mut index = empty_index();
+        index.evidence.insert(
+            "e".into(),
+            EvidenceDecl {
+                name: "e".into(),
+                kind: EvidenceKind::Samples {
+                    dataset: "ds".into(),
+                    value_col: 0,
+                    group_col: Some(1),
+                    delim: "csv".into(),
+                },
+                modifiers: Vec::new(),
+                span: span(),
+            },
+        );
+        index
+    }
+
+    #[test]
+    fn mean_claim_passes_and_stays_observational() {
+        let index = samples_evidence_index();
+        let groups = BTreeMap::from([(
+            "club".to_string(),
+            GroupStats {
+                n: 240,
+                mean: 42.0,
+                median: 42.0,
+                sd: 2.0,
+                ci95: 0.25,
+            },
+        )]);
+        let claim = mean_claim(
+            "club",
+            42.0,
+            1.2,
+            vec![
+                Requirement::SamplesAtLeast(200),
+                Requirement::ConfidenceAtLeast(0.95),
+                Requirement::Power(0.8),
+                Requirement::Delta(2.0),
+            ],
+        );
+        let result = check_direct_claim(&index, &claim, &samples_outcome(groups));
+        assert_eq!(result.status, ClaimStatus::Provisional, "{:?}", result);
+        assert_eq!(result.strength, Some(Strength::Observational));
+    }
+
+    #[test]
+    fn mean_claim_fails_on_unknown_group() {
+        let index = samples_evidence_index();
+        let groups = BTreeMap::from([(
+            "club".to_string(),
+            GroupStats {
+                n: 240,
+                mean: 42.0,
+                median: 42.0,
+                sd: 2.0,
+                ci95: 0.25,
+            },
+        )]);
+        let claim = mean_claim("sword", 42.0, 1.2, vec![]);
+        let result = check_direct_claim(&index, &claim, &samples_outcome(groups));
+        assert_eq!(result.status, ClaimStatus::Failed);
+        assert!(result.error.unwrap().contains("no group `sword`"));
+    }
+
+    #[test]
+    fn mean_claim_fails_when_tolerance_is_tighter_than_ci() {
+        let index = samples_evidence_index();
+        let groups = BTreeMap::from([(
+            "club".to_string(),
+            GroupStats {
+                n: 240,
+                mean: 42.0,
+                median: 42.0,
+                sd: 2.0,
+                ci95: 0.5,
+            },
+        )]);
+        let claim = mean_claim("club", 42.0, 0.1, vec![]);
+        let result = check_direct_claim(&index, &claim, &samples_outcome(groups));
+        assert_eq!(result.status, ClaimStatus::Failed);
+        assert!(result.error.unwrap().contains("tighter than"));
+    }
+
+    #[test]
+    fn mean_claim_is_underpowered_hypothesis_for_tiny_delta() {
+        let index = samples_evidence_index();
+        let groups = BTreeMap::from([(
+            "club".to_string(),
+            GroupStats {
+                n: 120,
+                mean: 42.0,
+                median: 42.0,
+                sd: 2.0,
+                ci95: 0.36,
+            },
+        )]);
+        let claim = mean_claim(
+            "club",
+            42.0,
+            2.0,
+            vec![Requirement::Power(0.8), Requirement::Delta(0.001)],
+        );
+        let result = check_direct_claim(&index, &claim, &samples_outcome(groups));
+        assert_eq!(result.status, ClaimStatus::Hypothesis);
+        assert!(result.note.unwrap().contains("underpowered"));
+        assert_eq!(result.strength, Some(Strength::Observational));
+    }
+
+    fn refute_decl(goal: Atom) -> RefuteDecl {
+        RefuteDecl {
+            name: "R".into(),
+            goal,
+            build: "b1".into(),
+            evidence: "e".into(),
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn refute_seals_on_matching_contradicts_fact() {
+        let index = empty_index();
+        let refute = refute_decl(Atom {
+            name: "can_predict".into(),
+            args: vec![Term::Lit(Lit::Sym("conn_7".into()))],
+            span: span(),
+        });
+        let mut out = EvidenceOutcome::new("e", "external", Strength::Observational, "ok");
+        out.fact(
+            "contradicts",
+            vec![
+                Value::sym("e"),
+                Value::sym("can_predict"),
+                Value::list(vec![Value::sym("conn_7")]),
+            ],
+        );
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("e".to_string(), out);
+        let result = check_refute(&index, &refute, &outcomes);
+        assert_eq!(result.status, ClaimStatus::Sealed, "{result:?}");
+        assert_eq!(
+            result.strength,
+            Some(Strength::Observational),
+            "external contradicts facts stay Observational"
+        );
+    }
+
+    #[test]
+    fn refute_fails_and_lists_available_contradicts_facts() {
+        let index = empty_index();
+        let refute = refute_decl(Atom {
+            name: "can_predict".into(),
+            args: vec![Term::Lit(Lit::Sym("conn_7".into()))],
+            span: span(),
+        });
+        let mut out = EvidenceOutcome::new("e", "external", Strength::Observational, "ok");
+        out.fact(
+            "contradicts",
+            vec![
+                Value::sym("e"),
+                Value::sym("can_predict"),
+                Value::list(vec![Value::sym("conn_9")]),
+            ],
+        );
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("e".to_string(), out);
+        let result = check_refute(&index, &refute, &outcomes);
+        assert_eq!(result.status, ClaimStatus::Failed);
+        let err = result.error.unwrap();
+        assert!(
+            err.contains("available: contradicts(e, can_predict, [conn_9])"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn refute_rng_path_is_unchanged() {
+        let index = empty_index();
+        let refute = refute_decl(Atom {
+            name: "algo".into(),
+            args: vec![
+                Term::Lit(Lit::Sym("r".into())),
+                Term::Lit(Lit::Sym("XORSHIFT128".into())),
+            ],
+            span: span(),
+        });
+        let mut out = EvidenceOutcome::new("e", "recovery", Strength::Deterministic, "mismatch");
+        out.fact(
+            "sim_fail",
+            vec![Value::sym("e"), Value::sym("r"), Value::sym("XORSHIFT128")],
+        );
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("e".to_string(), out);
+        let result = check_refute(&index, &refute, &outcomes);
+        assert_eq!(result.status, ClaimStatus::Sealed);
+        assert_eq!(result.strength, Some(Strength::Deterministic));
+    }
+
+    #[test]
+    fn dataset_id_parsing_and_missing_id_formatting() {
+        assert_eq!(parse_dataset_id("42"), Some(42));
+        assert_eq!(parse_dataset_id("0x2a"), Some(42));
+        assert_eq!(parse_dataset_id("0X2A"), Some(42));
+        assert_eq!(parse_dataset_id("nope"), None);
+        assert_eq!(format_missing_ids(&[0x79]), "0x79");
+        let many: Vec<i128> = (0..40).collect();
+        let shown = format_missing_ids(&many);
+        assert!(shown.contains("+8 more"), "{shown}");
+        assert!(shown.contains("0x1f"), "{shown}");
+        assert!(!shown.contains("0x20"), "{shown}");
+    }
 }

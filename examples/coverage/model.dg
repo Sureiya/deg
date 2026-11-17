@@ -1,0 +1,55 @@
+// Coverage claims: how many IDs from a locked dataset are covered by sealed
+// claims of one relation family. DeG is not the count authority — the dataset
+// fixes the universe, and each premise must be a ground claim whose first
+// argument is an ID from that dataset.
+//
+// Run:
+//   deg check examples/coverage/model.dg
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+// A 5-byte image whose bytes are 01..05 at addresses 0..4.
+dump ids_bin = dump("../fixtures/ids.bin",
+  sha256: "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+  base: 0, build: b1);
+
+dataset ds_ids = dataset("../fixtures/ids.txt",
+  sha256: "f2af7660af000d4a17f250215c964a25168a4edfcd331d0c7dbef0970cf8c733",
+  build: b1);
+
+dataset ds_ids6 = dataset("../fixtures/ids6.txt",
+  sha256: "63af3e1119e248f8c0e9d9f3fd13b961224df243fa158c2058763ab81229e83d",
+  build: b1);
+
+ev e_b1 := bytes(ids_bin, at: 0, expect: "01");
+ev e_b2 := bytes(ids_bin, at: 1, expect: "02");
+ev e_b3 := bytes(ids_bin, at: 2, expect: "03");
+ev e_b4 := bytes(ids_bin, at: 3, expect: "04");
+ev e_b5 := bytes(ids_bin, at: 4, expect: "05");
+
+rule opcode_1: opcode(1) if bytes_ok(?e, 0x0);
+rule opcode_2: opcode(2) if bytes_ok(?e, 0x1);
+rule opcode_3: opcode(3) if bytes_ok(?e, 0x2);
+rule opcode_4: opcode(4) if bytes_ok(?e, 0x3);
+rule opcode_5: opcode(5) if bytes_ok(?e, 0x4);
+
+proof P_1 : opcode(1) in b1 { evidence e_b1; rules opcode_1; }
+proof P_2 : opcode(2) in b1 { evidence e_b2; rules opcode_2; }
+proof P_3 : opcode(3) in b1 { evidence e_b3; rules opcode_3; }
+proof P_4 : opcode(4) in b1 { evidence e_b4; rules opcode_4; }
+proof P_5 : opcode(5) in b1 { evidence e_b5; rules opcode_5; }
+
+// All five dataset ids are covered by sealed ground claims: Sealed.
+claim C_cov : coverage(ds_ids, target: 5) in b1
+  from P_1, P_2, P_3, P_4, P_5;
+
+// The same premises cover 5 ids, not the declared 82: Hypothesis.
+claim C_cov82 : coverage(ds_ids, target: 82) in b1
+  from P_1, P_2, P_3, P_4, P_5;
+
+// The six-id dataset contains id 6, which no premise covers: Hypothesis
+// with the missing id named.
+claim C_cov6 : coverage(ds_ids6, target: 6) in b1
+  from P_1, P_2, P_3, P_4, P_5;

@@ -1,0 +1,29 @@
+// Generic numeric-sample statistics: `samples` evidence summarizes a locked
+// CSV dataset per group, and a `mean` claim checks a claimed population mean
+// against the measured mean, its 95% CI, and (when declared) the power of the
+// test against a stated alternative. Mean claims are always Observational.
+//
+// Run:
+//   deg check examples/stats/model.dg
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+dataset ds_atk = dataset("../fixtures/attack-samples.csv",
+  sha256: "897f0fa32e2ea6f2410a23bc2e8a5dc5dd2dc86d0aaa26dc60021d9907b28b05",
+  build: b1);
+
+ev e_atk := samples(ds_atk, value: 0, group: 1, delim: "csv");
+
+// The club group has n=120, mean≈41.9, sd≈2.0, so the claimed 42.0 ± 1.2 is
+// consistent with the evidence CI (0.36) and powered for delta=2.0.
+claim C_club_mean : mean(club) ~ 42.0 ± 1.2 in b1
+  provisional until "2099-12-31"
+  by e_atk require samples >= 100, confidence >= 0.95, power: 0.8, delta: 2.0;
+
+// A power analysis against delta=0.001 needs tens of millions of samples:
+// the kernel records this as an underpowered hypothesis, not a failure.
+claim C_sword_tiny_delta : mean(sword) ~ 42.0 ± 2.0 in b1
+  provisional until "2099-12-31"
+  by e_atk require power: 0.8, delta: 0.001;

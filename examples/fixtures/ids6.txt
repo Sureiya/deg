@@ -1,0 +1,7 @@
+# six ids: id 6 is not covered by any premise
+1
+2
+3
+4
+5
+6

@@ -1,0 +1,44 @@
+// Generic conflicts and hash-pinned human decisions. Any two active claims
+// can be declared conflicting; a conflict is resolved by a `prefer` clause or
+// by a `decision` file whose digest is re-checked at every run.
+//
+// Run:
+//   deg check examples/conflicts/model.dg
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+dump ids_bin = dump("../fixtures/ids.bin",
+  sha256: "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+  base: 0, build: b1);
+
+ev e_b1 := bytes(ids_bin, at: 0, expect: "01");
+ev e_b2 := bytes(ids_bin, at: 1, expect: "02");
+ev e_b3 := bytes(ids_bin, at: 2, expect: "03");
+ev e_b4 := bytes(ids_bin, at: 3, expect: "04");
+
+rule version_1: version(1) if bytes_ok(?e, 0x0);
+rule version_2: version(2) if bytes_ok(?e, 0x1);
+rule version_3: version(3) if bytes_ok(?e, 0x2);
+rule version_4: version(4) if bytes_ok(?e, 0x3);
+
+proof P_a : version(1) in b1 { evidence e_b1; rules version_1; }
+proof P_b : version(2) in b1 { evidence e_b2; rules version_2; }
+proof P_c : version(3) in b1 { evidence e_b3; rules version_3; }
+proof P_d : version(4) in b1 { evidence e_b4; rules version_4; }
+
+// A generic conflict resolved inline: P_b is demoted to a hypothesis.
+conflict C_v : P_a vs P_b
+  prefer P_a
+  reason "the first version claim is the one we verified end-to-end";
+
+// The same mechanism, resolved by a hash-pinned human decision file. If the
+// file is edited, the digest mismatches and the conflict is unresolved.
+decision D_cd := decision("decisions/prefer_d.txt",
+  sha256: "8ceafe95256a677ca37f121f1ca9b10f49db72482d85b0fa19210fce8c4b06b6",
+  prefer: P_d, over: P_c, signer: "conflict-auditor");
+
+conflict C_dec : P_c vs P_d
+  decision D_cd
+  reason "a human decision resolves this pair";

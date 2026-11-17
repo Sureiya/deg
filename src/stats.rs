@@ -240,6 +240,29 @@ pub fn median(values: &[f64]) -> f64 {
     }
 }
 
+pub fn mean(values: &[f64]) -> f64 {
+    let n = values.iter().filter(|x| x.is_finite()).count();
+    if n == 0 {
+        return f64::NAN;
+    }
+    values.iter().filter(|x| x.is_finite()).sum::<f64>() / n as f64
+}
+
+/// Sample standard deviation (n-1 denominator), for n ≥ 2.
+pub fn sample_sd(values: &[f64]) -> f64 {
+    let n = values.iter().filter(|x| x.is_finite()).count();
+    if n < 2 {
+        return f64::NAN;
+    }
+    let m = mean(values);
+    let ss: f64 = values
+        .iter()
+        .filter(|x| x.is_finite())
+        .map(|x| (x - m) * (x - m))
+        .sum();
+    (ss / (n - 1) as f64).sqrt()
+}
+
 pub fn mad(values: &[f64]) -> f64 {
     let m = median(values);
     if !m.is_finite() {
@@ -352,5 +375,17 @@ mod tests {
     fn median_and_mad_are_robust() {
         assert_eq!(median(&[1.0, 2.0, 3.0, 4.0, 100.0]), 3.0);
         assert_eq!(mad(&[1.0, 2.0, 3.0, 4.0, 100.0]), 1.0);
+    }
+
+    #[test]
+    fn mean_and_sample_sd_are_exact_on_small_inputs() {
+        assert!(close(mean(&[1.0, 2.0, 3.0, 4.0]), 2.5, 1e-12));
+        assert!(close(
+            sample_sd(&[1.0, 2.0, 3.0, 4.0]),
+            1.2909944487358056,
+            1e-12
+        ));
+        assert!(mean(&[]).is_nan());
+        assert!(sample_sd(&[1.0]).is_nan());
     }
 }

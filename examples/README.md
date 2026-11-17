@@ -74,6 +74,49 @@ marks the algorithm proof stale (missing constant), and drops the recovery
 witness (old state does not reproduce the new stream). Nothing is silently
 carried.
 
+## `stats/` — samples and mean claims
+
+```console
+cargo run -q -- check examples/stats/model.dg
+```
+
+`samples` evidence summarizes a locked CSV of mechanics metrics per group
+(n, mean, median, sd, 95% CI), and `mean` claims check a claimed mean against
+the measured one, its CI, and a power analysis. `C_club_mean` is provisional at
+Observational; the tiny-delta claim is recorded as an underpowered hypothesis.
+
+## `coverage/` — coverage claims
+
+```console
+cargo run -q -- check examples/coverage/model.dg
+```
+
+Five sealed proofs cover opcode ids 1..5 from a locked dataset. `C_cov` seals;
+`C_cov82` is a hypothesis because only 5 of the 82 target ids are covered, and
+`C_cov6` names the uncovered id 6. DeG counts against the dataset, never on its
+own authority.
+
+## `conflicts/` — generic conflicts and decisions
+
+```console
+cargo run -q -- check examples/conflicts/model.dg
+```
+
+Any two active claims can be declared conflicting. `C_v` resolves inline with
+`prefer`; `C_dec` resolves through a hash-pinned human decision file that the
+kernel re-hashes at every check. Editing the file breaks the digest, leaves the
+conflict unresolved, and blocks sealing.
+
+## `refute/` — generalized refutation
+
+```console
+cargo run -q -- check examples/refute/model.dg
+```
+
+A `contradicts(ev, rel, [args…])` fact — here carried by an external
+certificate's generic facts array — refutes an arbitrary ground atom. The
+refutation seals at the evidence's strength, capped by Deterministic.
+
 ## Fixtures
 
 | File | Used for |
@@ -83,9 +126,12 @@ carried.
 | `mt-state-b1.txt`, `mt-observed-b1.txt` | MT19937 state and 64 outputs |
 | `mt-state-b2.txt`, `mt-observed-b2.txt` | a different stream for the port example |
 | `xs-state.txt` | 4-word xorshift128 state for the refutation |
+| `attack-samples.csv` | 240 rows of synthetic per-group mechanic metrics for the stats example |
+| `ids.bin`, `ids.txt`, `ids6.txt` | 5-byte opcode image and id universes for coverage/conflict examples |
 | `trace.json` | external packet-field → function dataflow certificate |
 | `absence.json` | audited `.text` / time-window absence certificate |
 | `observability.json` | external connection/window observability certificate |
+| `contradicts.json` | external certificate carrying a generic `contradicts` fact |
 | `symbols-b1.json` | PDB-like symbols and a Vec3 type |
 | `manifest.json` | hashes of everything above |
 

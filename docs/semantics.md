@@ -70,6 +70,7 @@ The strength assignment is fixed per primitive:
 | `rate`, stationary | `Observational` |
 | `rate`, nonstationary | `Heuristic` |
 | `sample` | `Observational` |
+| `samples` | `Observational` |
 | `symbols`, build and type match | `Exact` (store is a trusted input) |
 | `external` | `Observational` |
 | `absence` | `Observational` |
@@ -85,7 +86,8 @@ The **external cap** is a kernel invariant, not a convention:
 
 The same invariant holds for statistical evidence:
 
-> If `f` comes only from `rate` or `sample` evaluators, `s(f) ≤ Observational`.
+> If `f` comes only from `rate`, `sample`, or `samples` evaluators, then
+> `s(f) ≤ Observational`.
 
 ## 3. Fact closure
 
@@ -240,23 +242,100 @@ higher strength. A uniform claim is not a proof of uniformity; it is a
 procedure-checked failure to reject. This is the statistical asymmetry encoded
 in the kernel.
 
-## 7. Conflicts
+### 6.3 Mean
+
+`samples` evidence over a verified dataset with a value column (and an
+optional group column) produces, per group `g`:
+
+```
+n_g = |{ rows with group g }|
+mean_g = Σ x / n_g
+median_g, sd_g (n-1 denominator, n ≥ 2)
+ci95_g = 1.96 · sd_g / √n_g          (0 when n = 1, with a detail note)
+```
+
+These are emitted as facts `samples_group(e, g)`, `samples_n(e, g, n)`, and
+`*_milli(e, g, v)` facts for the mean/median/sd/CI (milli-scaled rounded
+integers), plus a `Measured::Samples` payload. The evidence strength is
+`Observational`.
+
+A claim `mean(m) ~ μ ± ε` (where `m` is a group symbol, or `""` for a
+group-less evidence term) checks, for the group named `m`:
+
+```
+|mean_m − μ| ≤ ε
+ε ≥ ci95_m · Φ⁻¹(1 − (1−c)/2) / 1.96        (confidence c, default 0.95)
+n_m ≥ samples_required                       (when declared)
+n_m ≥ ((z_{1−0.05/2} + z_power) · sd_m / δ)² (when power/δ declared)
+```
+
+`alpha` is fixed at 0.05 for mean claims in v0.1; there is no alpha
+requirement syntax for them. A mean mismatch or a tolerance tighter than the
+evidence CI is a hard failure; a sample shortfall or an underpowered test is a
+hypothesis. The result strength is `Observational`; sealing follows the
+provisional-until rules of the other statistical claims.
+
+## 7. Coverage claims
+
+A claim `coverage(ds, target: T) from P₁, …, Pₖ` is a counting judgment over a
+locked dataset, in which the kernel never invents the universe:
+
+```
+ids(ds)       = distinct integers in ds (hex 0x… allowed; blank/# ignored)
+F(P₁)         = rel of P₁'s ground goal          (the relation family)
+covered       = { arg₀(Pᵢ) : ∀i }                (each must be ∈ ids(ds))
+missing       = ids(ds) \ covered
+```
+
+Every premise must be Sealed or Provisional with a ground goal, and every
+premise must share the family relation and cover an ID from the dataset. The
+claim is:
+
+- **Failed** if a premise is failed/refuted/stale/open/hypothesis (named in
+  the error), lacks a ground goal, leaves the family, or covers an ID outside
+  the dataset;
+- **Hypothesis** if `missing ≠ ∅` (“covered N/T; missing: …”, up to 32 IDs
+  named) or if `|covered| ≠ T` (“covered N/T (target not met)”);
+- **Sealed** (or Provisional, propagating premise expiries) when
+  `covered ⊇ ids(ds)` and `|covered| = T`.
+
+The strength is `⊓` of the premise strengths; the weakest premise is the
+bottleneck. `covered`, `target`, and `missing` are recorded in the JSON report
+and the lock.
+
+## 8. Decisions
+
+A `decision D := decision(path, sha256: h, prefer: A, over: B, signer: s)` is a
+content-addressed human judgment:
+
+```
+D ok        if sha256(bytes(resolve(path))) = h      (case-insensitive)
+```
+
+A missing file or digest mismatch is a hard error and `D` is not usable.
+Decisions do not emit facts; they are recorded in the report and lock.
+
+## 9. Conflicts
 
 A conflict exists when two *active* claims (Sealed, Provisional, or Hypothesis)
-have the same build and the same distribution reference, one with head `uniform`
-and the other with head `biased`.
+are declared conflicting, or when the kernel auto-detects a uniform/biased pair
+over the same distribution.
 
-A `conflict` declaration `conflict C : A vs B prefer P reason "…"` resolves it
-by demoting the other side to Hypothesis. The demotion changes the claim's
-**status**, not its computed strength: the proof of `uniform` may still be a
-valid statistical procedure, but it is not treated as a sealed model fact when
-the code proof says otherwise. An undeclared pair is unresolved; it is a warning
-in `deg check` and a hard blocker in `deg seal`.
+A `conflict` declaration `conflict C : A vs B [prefer P | decision D] [reason
+"…"]` resolves the conflict by demoting the non-preferred side to Hypothesis.
+The preferred side is `prefer P` (one of the sides), or — when the declaration
+names a decision — `D.prefer` if `D` is ok and `{D.prefer, D.over}` equals the
+conflict's sides in some order. The demotion changes the claim's **status**,
+not its computed strength: the proof may still be a valid procedure, but it is
+not treated as a sealed model fact when the resolution says otherwise. An
+undeclared pair (or a declaration that cannot be resolved) is unresolved; it is
+a warning in `deg check` and a hard blocker in `deg seal`.
 
 The choice of preference is not made by the kernel. The researcher records the
-reason; the kernel records the resolution and the demotion.
+reason (or a hash-pinned decision file); the kernel records the resolution and
+the demotion.
 
-## 8. Obligations
+## 10. Obligations
 
 An obligation `O : φ priority p [blocks seal]` is resolved if:
 
@@ -268,7 +347,7 @@ Otherwise it is open. If `blocks_seal` is set, an open obligation prevents
 `deg seal`. Obligations do not affect proof strength; they are the accounting
 of what is not proved.
 
-## 9. Refutation
+## 11. Refutation
 
 A refutation `refute R : algo(rng, A) by e` requires the evidence `e` to emit
 `sim_fail(e, rng, A)`. Since `sim_fail` is a deterministic observation of a
@@ -277,11 +356,20 @@ ground goal is marked Refuted. A refutation is not negated Datalog: it is a
 positive fact about a mismatch, which is why it does not require general
 negation.
 
-The implementation currently supports only `algo(rng, A)` refutations. A
-refutation of `recovered(...)` or a statistical claim would need a different
-certificate shape and is future work.
+Any other ground goal `φ = rel(v₁, …, vₙ)` is refuted when the evidence emits
 
-## 10. Port judgment
+```
+contradicts(e, rel, [v₁, …, vₙ])
+```
+
+with the goal's relation and argument list. The refutation then seals at
+`min(s_E, Deterministic)`: core primitives may emit `contradicts` at their own
+strength in the future, while extensions can emit it today through an external
+certificate's generic `facts` array (capped at Observational). A refutation
+whose evidence carries no matching `contradicts` fact fails, listing the
+`contradicts` facts that were available.
+
+## 12. Port judgment
 
 Porting is a partial relation
 
@@ -315,17 +403,18 @@ The port relation is intentionally not a theorem-preserving compilation. It is
 a report that tells you which obligations must be discharged before the target
 model can be sealed again.
 
-## 11. Seal judgment
+## 13. Seal judgment
 
 `deg seal` writes a lock only if:
 
 ```
 for every artifact a: H(a) = declared(a)
+for every decision d: sha256(bytes(d)) = declared(d)
 for every claim c:
   c is Sealed, or Provisional with a future expiry
   and (c is a hypothesis only if --strict is not given)
 for every blocking obligation: resolved
-for every conflict: resolved by a prefer clause
+for every conflict: resolved by a prefer clause or a verified decision
 ```
 
 `--strict` additionally requires every claim to be Sealed or Provisional; by
@@ -336,7 +425,7 @@ The lock is deterministic: it contains no timestamps other than the declared
 provisional expiry, and all maps are sorted. The artifact digests and claim
 support sets make it reproducible.
 
-## 12. Soundness and its limits
+## 14. Soundness and its limits
 
 The kernel's guarantee, stated without overclaiming:
 

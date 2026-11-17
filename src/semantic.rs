@@ -29,6 +29,7 @@ pub struct ModelIndex {
     pub proofs: BTreeMap<String, ProofDecl>,
     pub claims: BTreeMap<String, ClaimDecl>,
     pub conflicts: Vec<ConflictDecl>,
+    pub decisions: BTreeMap<String, DecisionDecl>,
     pub obligations: Vec<ObligationDecl>,
     pub refutes: Vec<RefuteDecl>,
     pub ports: Vec<PortDecl>,
@@ -57,6 +58,7 @@ impl ModelIndex {
             proofs: BTreeMap::new(),
             claims: BTreeMap::new(),
             conflicts: Vec::new(),
+            decisions: BTreeMap::new(),
             obligations: Vec::new(),
             refutes: Vec::new(),
             ports: Vec::new(),
@@ -124,6 +126,13 @@ impl ModelIndex {
                 Item::Proof(d) => dup(&mut index.proofs, &d.name, "proof", &mut errors, d.clone()),
                 Item::Claim(d) => dup(&mut index.claims, &d.name, "claim", &mut errors, d.clone()),
                 Item::Conflict(d) => index.conflicts.push(d.clone()),
+                Item::Decision(d) => dup(
+                    &mut index.decisions,
+                    &d.name,
+                    "decision",
+                    &mut errors,
+                    d.clone(),
+                ),
                 Item::Obligation(d) => index.obligations.push(d.clone()),
                 Item::Refute(d) => index.refutes.push(d.clone()),
                 Item::Port(d) => index.ports.push(d.clone()),
@@ -361,6 +370,7 @@ impl ModelIndex {
             EvidenceKind::Rate { capture, .. } | EvidenceKind::Sample { capture, .. } => {
                 self.captures.get(capture).and_then(|c| c.build.clone())
             }
+            EvidenceKind::Samples { .. } => None,
         }
     }
 
@@ -735,6 +745,27 @@ impl ModelIndex {
                 EvidenceKind::External { build, .. } => {
                     self.need_build(build, &ev.name, errors);
                 }
+                EvidenceKind::Samples {
+                    dataset,
+                    value_col,
+                    group_col,
+                    ..
+                } => {
+                    if !self.datasets.contains_key(dataset) {
+                        errors.push(format!(
+                            "evidence `{}` refers to unknown dataset `{dataset}`",
+                            ev.name
+                        ));
+                    }
+                    if let Some(g) = group_col {
+                        if g == value_col {
+                            errors.push(format!(
+                                "evidence `{}`: group column equals value column ({g})",
+                                ev.name
+                            ));
+                        }
+                    }
+                }
                 EvidenceKind::Symbols { build, .. } => {
                     self.need_build(build, &ev.name, errors);
                 }
@@ -856,6 +887,28 @@ impl ModelIndex {
                         ));
                     }
                 }
+                ClaimHead::Mean { .. } => {
+                    if !matches!(claim.body, ClaimBody::Direct { .. }) {
+                        errors.push(format!(
+                            "claim `{}`: a mean claim needs `by <samples evidence>`",
+                            claim.name
+                        ));
+                    }
+                }
+                ClaimHead::Coverage { dataset, .. } => {
+                    if !self.datasets.contains_key(dataset) {
+                        errors.push(format!(
+                            "claim `{}` refers to unknown dataset `{dataset}`",
+                            claim.name
+                        ));
+                    }
+                    if !matches!(claim.body, ClaimBody::Coverage { .. }) {
+                        errors.push(format!(
+                            "claim `{}`: a coverage claim needs `from <claim,...>`",
+                            claim.name
+                        ));
+                    }
+                }
                 ClaimHead::Rel(_) => {}
             }
             match &claim.body {
@@ -867,7 +920,7 @@ impl ModelIndex {
                         ));
                     }
                 }
-                ClaimBody::Derived { from } => {
+                ClaimBody::Derived { from } | ClaimBody::Coverage { from } => {
                     if from.is_empty() {
                         errors.push(format!("claim `{}` has no premises", claim.name));
                     }
@@ -906,7 +959,7 @@ impl ModelIndex {
             return;
         }
         if let Some(claim) = self.claims.get(name) {
-            if let ClaimBody::Derived { from } = &claim.body {
+            if let ClaimBody::Derived { from } | ClaimBody::Coverage { from } = &claim.body {
                 for f in from {
                     if self.claims.contains_key(f) {
                         self.visit_claim(f, visiting, done, errors);
@@ -940,6 +993,35 @@ impl ModelIndex {
                         c.name
                     ));
                 }
+            }
+            if let Some(d) = &c.decision {
+                if !self.decisions.contains_key(d) {
+                    errors.push(format!(
+                        "conflict `{}` refers to unknown decision `{d}`",
+                        c.name
+                    ));
+                }
+            }
+        }
+        for d in self.decisions.values() {
+            let known = |n: &str| self.proofs.contains_key(n) || self.claims.contains_key(n);
+            if !known(&d.prefer) {
+                errors.push(format!(
+                    "decision `{}` prefers unknown claim `{}`",
+                    d.name, d.prefer
+                ));
+            }
+            if !known(&d.over) {
+                errors.push(format!(
+                    "decision `{}` overrides unknown claim `{}`",
+                    d.name, d.over
+                ));
+            }
+            if d.prefer == d.over {
+                errors.push(format!(
+                    "decision `{}` prefers and overrides the same claim `{}`",
+                    d.name, d.prefer
+                ));
             }
         }
         for o in &self.obligations {
@@ -1074,5 +1156,85 @@ mod tests {
         let m = parse_model("t.dg", src).unwrap();
         let errs = ModelIndex::new(&m).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("collides")));
+    }
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn samples_evidence_validates_dataset_and_columns() {
+        let src = format!(
+            r#"
+            build b1 = binary("g.bin", sha256: "{SHA}", arch: x86_64);
+            dataset ds = dataset("s.csv", sha256: "{SHA}", build: b1);
+            ev e := samples(ds, value: 1, group: 1);
+            ev e2 := samples(missing, value: 0);
+            "#
+        );
+        let m = parse_model("t.dg", &src).unwrap();
+        let errs = ModelIndex::new(&m).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("group column equals value column")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("refers to unknown dataset `missing`")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn coverage_claim_validates_dataset_and_body() {
+        let src = format!(
+            r#"
+            build b1 = binary("g.bin", sha256: "{SHA}", arch: x86_64);
+            dataset ds = dataset("ids.txt", sha256: "{SHA}", build: b1);
+            claim C : coverage(ds, target: 5) in b1 by e;
+            claim C2 : coverage(missing, target: 5) in b1 from P;
+            "#
+        );
+        let m = parse_model("t.dg", &src).unwrap();
+        let errs = ModelIndex::new(&m).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("a coverage claim needs `from")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("refers to unknown dataset `missing`")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn decisions_and_conflict_references_are_validated() {
+        let src = format!(
+            r#"
+            build b1 = binary("g.bin", sha256: "{SHA}", arch: x86_64);
+            decision D := decision("d.txt", sha256: "{SHA}", prefer: P_a, over: P_b, signer: "x");
+            decision D2 := decision("d2.txt", sha256: "{SHA}", prefer: P_a, over: P_a);
+            conflict C : P_a vs P_b decision D;
+            conflict C2 : P_a vs P_b decision NOPE;
+            "#
+        );
+        let m = parse_model("t.dg", &src).unwrap();
+        let errs = ModelIndex::new(&m).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("prefers unknown claim `P_a`")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("prefers and overrides the same claim")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("refers to unknown decision `NOPE`")),
+            "{errs:?}"
+        );
     }
 }

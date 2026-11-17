@@ -11,6 +11,10 @@
     "mt-observed-b1.txt": "e7a25b93fe4fece78c109a813466254dc5efa010180cbef98cf64b2da8a56f58",
     "mt-state-b2.txt": "2fc0fe3d276c7d1e1fd66ef5311a942a1dbc7d39c5e1e963b5aa224cc751b0f5",
     "mt-observed-b2.txt": "7aa78ae60119e2fff24a78376cdb452771b099a166eedad8a2455c7785637a56",
-    "xs-state.txt": "7466bd28e4fe6efbebde95f7dd68ebc9fc4c45c31fb63f9b69c2e57b3757ce8e"
+    "xs-state.txt": "7466bd28e4fe6efbebde95f7dd68ebc9fc4c45c31fb63f9b69c2e57b3757ce8e",
+    "attack-samples.csv": "897f0fa32e2ea6f2410a23bc2e8a5dc5dd2dc86d0aaa26dc60021d9907b28b05",
+    "ids.bin": "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0",
+    "ids.txt": "f2af7660af000d4a17f250215c964a25168a4edfcd331d0c7dbef0970cf8c733",
+    "ids6.txt": "63af3e1119e248f8c0e9d9f3fd13b961224df243fa158c2058763ab81229e83d"
   }
 }

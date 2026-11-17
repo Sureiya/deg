@@ -49,6 +49,11 @@ pub fn print_check(report: &CheckReport, model: &str, strict: bool) {
         report.conflicts.len(),
         report.unresolved_conflicts().len()
     );
+    println!(
+        "  decisions   {} ({} ok)",
+        report.decisions.len(),
+        report.decisions.iter().filter(|d| d.ok).count()
+    );
     println!("  threshold   {}", report.seal_threshold);
 
     if !report.errors.is_empty() {
@@ -95,6 +100,31 @@ pub fn print_check(report: &CheckReport, model: &str, strict: bool) {
         if let Some(b) = &c.bottleneck {
             println!("      bottleneck: {b}");
         }
+        if let Some(cov) = &c.coverage {
+            if cov.missing.is_empty() {
+                println!(
+                    "      coverage: {}/{} covered; missing: none",
+                    cov.covered, cov.target
+                );
+            } else {
+                let shown: Vec<String> = cov
+                    .missing
+                    .iter()
+                    .take(32)
+                    .map(|id| format!("{id:#x}"))
+                    .collect();
+                let mut line = format!(
+                    "      coverage: {}/{} covered; missing: {}",
+                    cov.covered,
+                    cov.target,
+                    shown.join(", ")
+                );
+                if cov.missing.len() > 32 {
+                    line.push_str(&format!(", +{} more", cov.missing.len() - 32));
+                }
+                println!("{line}");
+            }
+        }
     }
 
     if !report.obligations.is_empty() {
@@ -112,8 +142,13 @@ pub fn print_check(report: &CheckReport, model: &str, strict: bool) {
     if !report.conflicts.is_empty() {
         println!("\nconflicts:");
         for c in &report.conflicts {
+            let source = c
+                .decision
+                .as_ref()
+                .map(|d| format!(" via decision {d}"))
+                .unwrap_or_default();
             println!(
-                "  {:<24} {} vs {}{}",
+                "  {:<24} {} vs {}{}{}",
                 c.name,
                 c.left,
                 c.right,
@@ -128,7 +163,25 @@ pub fn print_check(report: &CheckReport, model: &str, strict: bool) {
                     )
                 } else {
                     " [UNRESOLVED]".into()
-                }
+                },
+                source
+            );
+        }
+    }
+    if !report.decisions.is_empty() {
+        println!("\ndecisions:");
+        for d in &report.decisions {
+            println!(
+                "  {:<24} prefer {} over {} sha256:{} {}{}",
+                d.name,
+                d.prefer,
+                d.over,
+                d.sha256,
+                if d.ok { "ok" } else { "MISMATCH" },
+                d.signer
+                    .as_ref()
+                    .map(|s| format!(" (signed by {s})"))
+                    .unwrap_or_default()
             );
         }
     }
@@ -260,6 +313,14 @@ pub fn report_json(report: &CheckReport, index: &ModelIndex) -> Json {
             if let Some(meas) = &c.measured {
                 m.insert("measured".into(), Json::Str(meas.clone()));
             }
+            if let Some(cov) = &c.coverage {
+                m.insert("covered".into(), Json::Num(cov.covered as f64));
+                m.insert("target".into(), Json::Num(cov.target as f64));
+                m.insert(
+                    "missing".into(),
+                    Json::Arr(cov.missing.iter().map(|id| Json::Num(*id as f64)).collect()),
+                );
+            }
             Json::Obj(m)
         })
         .collect();
@@ -301,10 +362,31 @@ pub fn report_json(report: &CheckReport, index: &ModelIndex) -> Json {
             if let Some(r) = &c.reason {
                 m.insert("reason".into(), Json::Str(r.clone()));
             }
+            if let Some(d) = &c.decision {
+                m.insert("decision".into(), Json::Str(d.clone()));
+            }
             Json::Obj(m)
         })
         .collect();
     root.insert("conflicts".into(), Json::Arr(conflicts));
+
+    let decisions = report
+        .decisions
+        .iter()
+        .map(|d| {
+            let mut m = BTreeMap::new();
+            m.insert("name".into(), Json::Str(d.name.clone()));
+            m.insert("sha256".into(), Json::Str(d.sha256.clone()));
+            m.insert("ok".into(), Json::Bool(d.ok));
+            m.insert("prefer".into(), Json::Str(d.prefer.clone()));
+            m.insert("over".into(), Json::Str(d.over.clone()));
+            if let Some(s) = &d.signer {
+                m.insert("signer".into(), Json::Str(s.clone()));
+            }
+            Json::Obj(m)
+        })
+        .collect();
+    root.insert("decisions".into(), Json::Arr(decisions));
 
     let defs = report
         .definitions
@@ -393,6 +475,29 @@ pub fn markdown(report: &CheckReport, index: &ModelIndex) -> String {
         if let Some(note) = &c.note {
             out.push_str(&format!("| | | | *{}* | |\n", note.replace('|', "\\|")));
         }
+        if let Some(cov) = &c.coverage {
+            let missing = if cov.missing.is_empty() {
+                "none".to_string()
+            } else {
+                let shown: Vec<String> = cov
+                    .missing
+                    .iter()
+                    .take(32)
+                    .map(|id| format!("{id:#x}"))
+                    .collect();
+                let mut s = shown.join(", ");
+                if cov.missing.len() > 32 {
+                    s.push_str(&format!(", +{} more", cov.missing.len() - 32));
+                }
+                s
+            };
+            out.push_str(&format!(
+                "| | | | *coverage: {}/{} covered; missing: {}* | |\n",
+                cov.covered,
+                cov.target,
+                missing.replace('|', "\\|")
+            ));
+        }
     }
     out.push('\n');
 
@@ -400,7 +505,7 @@ pub fn markdown(report: &CheckReport, index: &ModelIndex) -> String {
         out.push_str("## Conflicts\n\n");
         for c in &report.conflicts {
             out.push_str(&format!(
-                "- **{}**: `{}` vs `{}` — {}\n",
+                "- **{}**: `{}` vs `{}` — {}{}\n",
                 c.name,
                 c.left,
                 c.right,
@@ -419,7 +524,26 @@ pub fn markdown(report: &CheckReport, index: &ModelIndex) -> String {
                     )
                 } else {
                     "UNRESOLVED".into()
-                }
+                },
+                c.decision
+                    .as_ref()
+                    .map(|d| format!(" (via decision `{d}`)"))
+                    .unwrap_or_default()
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !report.decisions.is_empty() {
+        out.push_str("## Decisions\n\n| Decision | Prefers | Over | SHA-256 | Verified |\n|---|---|---|---|---|\n");
+        for d in &report.decisions {
+            out.push_str(&format!(
+                "| `{}` | `{}` | `{}` | `{}` | {} |\n",
+                d.name,
+                d.prefer,
+                d.over,
+                d.sha256,
+                if d.ok { "✓" } else { "✗" }
             ));
         }
         out.push('\n');
