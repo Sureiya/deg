@@ -187,6 +187,7 @@ already have*; it does not attack a live service or bypass access controls.
 - [Tutorial](docs/tutorial.md) — read, run, and extend a model.
 - [Examples](examples/README.md) — timing, RNG, conflict, and porting.
 - [Provenance](docs/source.md) — the design conversation that seeded the project.
+- [Applying DeG to adapterproject](docs/adapter-emulator.md) — a read-only assessment and pilot against `adapter-emulator`.
 
 ## License
 
