@@ -22,6 +22,8 @@ dataset-decl    = "dataset" ident "=" "dataset" args ";" ;
 
 ; Named arguments used by the built-in declarations:
 ;   build:    positional path;   sha256: hex64; arch: symbol;
+;             format: "raw" | "pe" (default raw; pe maps virtual addresses
+;             through the PE section table and ignores load:);
 ;             load: int; text: int ".." int
 ;   capture:  positional path;   sha256: hex64; build: ref; filter: string
 ;   dump:     positional path;   sha256: hex64; base: int; build: ref
@@ -88,10 +90,16 @@ dist-decl       = "dist" ident "in" ident "{"
 evidence-decl   = "ev" ident ":=" evidence-kind args { "|>" ident } ";" ;
 evidence-kind   = "scan" | "bytes" | "decode" | "constants" | "modulo"
                 | "recovery" | "rate" | "sample" | "external"
-                | "samples" | "symbols" | "absence" ;
+                | "samples" | "symbols" | "absence" | "table"
+                | ident ;   (* any other kind is an extension point:
+                               parsed as evidence with raw args and dispatched
+                               through the compiled-in registry, or failed at
+                               evaluation when not registered *)
 
 ; Kind-specific argument shapes:
 ;   scan       positional build, section, pattern
+;              (raw builds: section must be ".text"; pe builds: any section
+;               name resolved against the PE section table)
 ;   bytes      positional artifact; at: int; expect: string
 ;   decode     positional build, fn; count: int
 ;   constants  positional build; at: target; window: int; values: list
@@ -106,6 +114,8 @@ evidence-kind   = "scan" | "bytes" | "decode" | "constants" | "modulo"
 ;              delim: "csv" | "tsv" | "ws"
 ;   symbols    positional build, path
 ;   absence    positional path; build: ref; scope: string; during: ref
+;   table      positional dataset; format: "csv" | "tsv" | "ws" (default csv);
+;              has_header: bool (default false)
 
 ; ── rules ────────────────────────────────────────────────────────────────
 

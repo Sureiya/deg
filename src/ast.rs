@@ -78,6 +78,9 @@ pub struct BuildDecl {
     pub path: String,
     pub sha256: String,
     pub arch: String,
+    /// "raw" (default) or "pe". PE builds map virtual addresses through the
+    /// PE section table and ignore `load`.
+    pub format: String,
     pub load: u64,
     pub text: Option<(u64, u64)>,
     pub span: Span,
@@ -419,6 +422,16 @@ pub enum EvidenceKind {
         scope: String,
         during: String,
     },
+    Table {
+        dataset: String,
+        format: String,
+        has_header: bool,
+    },
+    /// An evidence kind provided by a compiled-in extension (see `ext`).
+    Extension {
+        kind: String,
+        args: Args,
+    },
 }
 
 impl EvidenceKind {
@@ -436,6 +449,8 @@ impl EvidenceKind {
             EvidenceKind::Samples { .. } => "samples",
             EvidenceKind::Symbols { .. } => "symbols",
             EvidenceKind::Absence { .. } => "absence",
+            EvidenceKind::Table { .. } => "table",
+            EvidenceKind::Extension { .. } => "extension",
         }
     }
 }

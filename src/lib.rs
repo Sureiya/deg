@@ -11,13 +11,16 @@
 
 pub mod artifact;
 pub mod ast;
+pub mod cli;
 pub mod evidence;
+pub mod ext;
 pub mod facts;
 pub mod json;
 pub mod kernel;
 pub mod lexer;
 pub mod parser;
 pub mod pcap;
+pub mod pe;
 pub mod port;
 pub mod prng;
 pub mod report;

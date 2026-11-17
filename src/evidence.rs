@@ -90,7 +90,7 @@ impl EvidenceOutcome {
         }
     }
 
-    pub(crate) fn new(
+    pub fn new(
         name: &str,
         kind: &str,
         strength: Strength,
@@ -109,11 +109,11 @@ impl EvidenceOutcome {
         }
     }
 
-    pub(crate) fn fact(&mut self, rel: &str, args: Vec<Value>) {
+    pub fn fact(&mut self, rel: &str, args: Vec<Value>) {
         self.facts.push((rel.to_string(), args));
     }
 
-    pub(crate) fn detail(&mut self, key: &str, value: impl Into<String>) {
+    pub fn detail(&mut self, key: &str, value: impl Into<String>) {
         self.details.push((key.to_string(), value.into()));
     }
 }
@@ -133,69 +133,98 @@ pub fn evaluate_all(ctx: &EvalCtx<'_>) -> BTreeMap<String, EvidenceOutcome> {
 }
 
 pub fn evaluate(ctx: &EvalCtx<'_>, decl: &EvidenceDecl) -> EvidenceOutcome {
-    let result = match &decl.kind {
-        EvidenceKind::Scan { build, pattern, .. } => eval_scan(ctx, decl, build, pattern),
-        EvidenceKind::Bytes {
-            artifact,
-            at,
-            expect,
-        } => eval_bytes(ctx, decl, artifact, *at, expect),
-        EvidenceKind::Decode { build, func, count } => eval_decode(ctx, decl, build, func, *count),
-        EvidenceKind::Constants {
-            build,
-            at,
-            window,
-            values,
-            unique,
-        } => eval_constants(ctx, decl, build, at, *window, values, *unique),
-        EvidenceKind::Modulo {
-            build,
-            func,
-            modulus,
-        } => eval_modulo(ctx, decl, build, func, *modulus),
-        EvidenceKind::Recovery {
-            rng,
-            algo,
-            state,
-            index,
-            observed,
-            projection,
-        } => eval_recovery(
-            ctx,
-            decl,
-            rng,
-            algo.as_ref(),
-            state,
-            *index,
-            observed,
-            projection,
-        ),
-        EvidenceKind::Rate {
-            capture,
-            opcode,
-            clock,
-        } => eval_rate(ctx, decl, capture, *opcode, clock.as_deref()),
-        EvidenceKind::Sample {
-            capture,
-            opcode,
-            field,
-            width,
-            big_endian,
-        } => eval_sample(ctx, decl, capture, *opcode, *field, *width, *big_endian),
-        EvidenceKind::External { path, kind, build } => eval_external(ctx, decl, path, kind, build),
-        EvidenceKind::Samples {
-            dataset,
-            value_col,
-            group_col,
-            delim,
-        } => eval_samples(ctx, decl, dataset, *value_col, *group_col, delim),
-        EvidenceKind::Symbols { build, path } => eval_symbols(ctx, decl, build, path),
-        EvidenceKind::Absence {
-            path,
-            build,
-            scope,
-            during,
-        } => eval_absence(ctx, decl, path, build, scope, during),
+    let result = if let EvidenceKind::Extension { kind, .. } = &decl.kind {
+        // Compiled-in extension kinds (see `ext`) are dispatched through the
+        // registry; unregistered kinds fail here with the list of what a
+        // build of this binary knows.
+        match crate::ext::get(kind) {
+            Some(ext) => (ext.eval)(ctx.index, ctx.artifacts, decl),
+            None => Err(format!(
+                "evidence kind `{kind}` is not registered; registered: {:?}",
+                crate::ext::registered()
+            )),
+        }
+    } else {
+        match &decl.kind {
+            EvidenceKind::Scan {
+                build,
+                section,
+                pattern,
+            } => eval_scan(ctx, decl, build, section, pattern),
+            EvidenceKind::Bytes {
+                artifact,
+                at,
+                expect,
+            } => eval_bytes(ctx, decl, artifact, *at, expect),
+            EvidenceKind::Decode { build, func, count } => {
+                eval_decode(ctx, decl, build, func, *count)
+            }
+            EvidenceKind::Constants {
+                build,
+                at,
+                window,
+                values,
+                unique,
+            } => eval_constants(ctx, decl, build, at, *window, values, *unique),
+            EvidenceKind::Modulo {
+                build,
+                func,
+                modulus,
+            } => eval_modulo(ctx, decl, build, func, *modulus),
+            EvidenceKind::Recovery {
+                rng,
+                algo,
+                state,
+                index,
+                observed,
+                projection,
+            } => eval_recovery(
+                ctx,
+                decl,
+                rng,
+                algo.as_ref(),
+                state,
+                *index,
+                observed,
+                projection,
+            ),
+            EvidenceKind::Rate {
+                capture,
+                opcode,
+                clock,
+            } => eval_rate(ctx, decl, capture, *opcode, clock.as_deref()),
+            EvidenceKind::Sample {
+                capture,
+                opcode,
+                field,
+                width,
+                big_endian,
+            } => eval_sample(ctx, decl, capture, *opcode, *field, *width, *big_endian),
+            EvidenceKind::External { path, kind, build } => {
+                eval_external(ctx, decl, path, kind, build)
+            }
+            EvidenceKind::Samples {
+                dataset,
+                value_col,
+                group_col,
+                delim,
+            } => eval_samples(ctx, decl, dataset, *value_col, *group_col, delim),
+            EvidenceKind::Symbols { build, path } => eval_symbols(ctx, decl, build, path),
+            EvidenceKind::Absence {
+                path,
+                build,
+                scope,
+                during,
+            } => eval_absence(ctx, decl, path, build, scope, during),
+            EvidenceKind::Table {
+                dataset,
+                format,
+                has_header,
+            } => eval_table(ctx, decl, dataset, format, *has_header),
+            EvidenceKind::Extension { .. } => {
+                unreachable!("extension evidence is handled above")
+            }
+        }
     };
     result.unwrap_or_else(|e| EvidenceOutcome::failed(&decl.name, decl.kind.name(), e))
 }
@@ -204,21 +233,22 @@ fn eval_scan(
     ctx: &EvalCtx<'_>,
     decl: &EvidenceDecl,
     build: &str,
+    section: &str,
     pattern: &str,
 ) -> Result<EvidenceOutcome, String> {
     if !ctx.artifacts.is_verified(build) {
         return Err(format!("build `{build}` is not a verified artifact"));
     }
-    let hits = ctx.artifacts.scan_build(build, pattern)?;
+    let hits = ctx.artifacts.scan_build(build, section, pattern)?;
     if hits.is_empty() {
         return Err(format!(
-            "pattern {pattern:?} matched nothing in {build} .text"
+            "pattern {pattern:?} matched nothing in {build} section {section:?}"
         ));
     }
     let unique_requested = decl.unique();
     if unique_requested && hits.len() != 1 {
         return Err(format!(
-            "pattern matched {} times; `|> unique` requires exactly one",
+            "pattern matched {} times in {build} section {section:?}; `|> unique` requires exactly one",
             hits.len()
         ));
     }
@@ -233,9 +263,12 @@ fn eval_scan(
         "scan",
         strength,
         if unique {
-            format!("unique match at {:#x}", hits[0])
+            format!("unique match in {section} at {:#x}", hits[0])
         } else {
-            format!("{} match(es); uniqueness not proven", hits.len())
+            format!(
+                "{} match(es) in {section}; uniqueness not proven",
+                hits.len()
+            )
         },
     );
     for hit in &hits {
@@ -251,6 +284,7 @@ fn eval_scan(
     if unique {
         out.fact("scan_unique", vec![Value::sym(&decl.name)]);
     }
+    out.detail("section", section);
     out.detail("pattern", pattern);
     out.detail("matches", hits.len().to_string());
     for (i, hit) in hits.iter().enumerate().take(8) {
@@ -1112,16 +1146,6 @@ fn eval_samples(
     Ok(out)
 }
 
-/// Split one dataset row on the declared delimiter. CSV/TSV split on the
-/// separator and trim each cell; `ws` splits on any whitespace run.
-fn split_row(line: &str, delim: &str) -> Vec<String> {
-    match delim {
-        "tsv" => line.split('\t').map(|c| c.trim().to_string()).collect(),
-        "ws" => line.split_whitespace().map(str::to_string).collect(),
-        _ => line.split(',').map(|c| c.trim().to_string()).collect(),
-    }
-}
-
 fn eval_external(
     ctx: &EvalCtx<'_>,
     decl: &EvidenceDecl,
@@ -1477,6 +1501,107 @@ fn eval_absence(
     Ok(out)
 }
 
+fn eval_table(
+    ctx: &EvalCtx<'_>,
+    decl: &EvidenceDecl,
+    dataset: &str,
+    format: &str,
+    has_header: bool,
+) -> Result<EvidenceOutcome, String> {
+    let text = ctx.artifacts.dataset_text(dataset)?;
+    let mut rows: Vec<Vec<Value>> = Vec::new();
+    let mut header: Vec<String> = Vec::new();
+    let mut cols: Option<usize> = None;
+    let mut header_seen = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if has_header && !header_seen {
+            header = split_row(line, format);
+            header_seen = true;
+            continue;
+        }
+        let cells: Vec<Value> = split_row(line, format)
+            .into_iter()
+            .map(|c| parse_table_cell(&c))
+            .collect();
+        match cols {
+            None => cols = Some(cells.len()),
+            Some(n) if n != cells.len() => {
+                return Err(format!(
+                    "dataset `{dataset}` has an inconsistent column count at row {}: expected {n} column(s), found {}",
+                    rows.len(),
+                    cells.len()
+                ))
+            }
+            Some(_) => {}
+        }
+        rows.push(cells);
+    }
+    let cols = cols.unwrap_or(0);
+
+    let mut out = EvidenceOutcome::new(
+        &decl.name,
+        "table",
+        Strength::Deterministic,
+        format!("{} rows x {} cols from {dataset}", rows.len(), cols),
+    );
+    for (i, cells) in rows.iter().enumerate() {
+        out.fact(
+            "row",
+            vec![
+                Value::sym(&decl.name),
+                Value::Int(i as i128),
+                Value::list(cells.clone()),
+            ],
+        );
+    }
+    out.fact(
+        "table_rows",
+        vec![Value::sym(&decl.name), Value::Int(rows.len() as i128)],
+    );
+    out.fact(
+        "table_cols",
+        vec![Value::sym(&decl.name), Value::Int(cols as i128)],
+    );
+    out.detail("dataset", dataset);
+    out.detail("format", format);
+    for (i, cell) in header.iter().enumerate() {
+        out.detail(&format!("header_col_{i}"), cell);
+    }
+    Ok(out)
+}
+
+/// Split one data line into cells on the declared delimiter. `csv` splits on
+/// commas, `tsv` on tabs, `ws` on any whitespace run. Cells are trimmed;
+/// quoted cells are not supported (keep tables delimiter-simple).
+fn split_row(line: &str, delim: &str) -> Vec<String> {
+    match delim {
+        "tsv" => line.split('\t').map(|c| c.trim().to_string()).collect(),
+        "ws" => line.split_whitespace().map(str::to_string).collect(),
+        _ => line.split(',').map(|c| c.trim().to_string()).collect(),
+    }
+}
+
+/// Parse one table cell into a fact value: empty → `Sym("")`; `0x…` → Int via
+/// hex; decimal integer → Int; anything else → Sym.
+fn parse_table_cell(cell: &str) -> Value {
+    if cell.is_empty() {
+        return Value::sym("");
+    }
+    if let Some(hex) = cell.strip_prefix("0x").or_else(|| cell.strip_prefix("0X")) {
+        if let Ok(n) = u64::from_str_radix(hex, 16) {
+            return Value::Int(n as i128);
+        }
+    }
+    if let Ok(n) = cell.parse::<i128>() {
+        return Value::Int(n);
+    }
+    Value::sym(cell)
+}
+
 fn check_cert_build(ctx: &EvalCtx<'_>, json: &Json, build: &str) -> Result<(), String> {
     let declared = ctx
         .artifacts
@@ -1643,6 +1768,7 @@ mod tests {
                 },
             )]),
             errors: Vec::new(),
+            pe_cache: std::cell::RefCell::new(BTreeMap::new()),
         };
         let ctx = EvalCtx {
             index: &index,

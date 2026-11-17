@@ -90,6 +90,19 @@ impl<'a> Parser<'a> {
         let path = self.need_pos_string(&args, 0, "build path", span)?;
         let sha256 = self.need_string(&args, "sha256", "build digest", span)?;
         let arch = args.string("arch").unwrap_or_else(|| "unknown".to_string());
+        let format = match args.string("format") {
+            Some(f) => {
+                let f = f.trim().to_ascii_lowercase();
+                if !matches!(f.as_str(), "raw" | "pe") {
+                    return Err(self.err(
+                        span,
+                        format!("build format must be `raw` or `pe`, found {f:?}"),
+                    ));
+                }
+                f
+            }
+            None => "raw".to_string(),
+        };
         let load = args.u64("load").unwrap_or(0);
         let text = match args.get("text") {
             Some(ArgVal::Range(a, b)) => Some((*a, *b)),
@@ -110,6 +123,7 @@ impl<'a> Parser<'a> {
             path,
             sha256,
             arch,
+            format,
             load,
             text,
             span,
@@ -637,7 +651,34 @@ impl<'a> Parser<'a> {
                     during,
                 }
             }
-            other => return Err(self.err(span, format!("unknown evidence kind `{other}`"))),
+            "table" => {
+                let dataset = self.need_pos_string(&args, 0, "table dataset", span)?;
+                let format = match args.string("format") {
+                    Some(f) => {
+                        let f = f.trim().to_ascii_lowercase();
+                        if !matches!(f.as_str(), "csv" | "tsv" | "ws") {
+                            return Err(self.err(
+                                span,
+                                format!(
+                                    "table format must be \"csv\", \"tsv\", or \"ws\", found {f:?}"
+                                ),
+                            ));
+                        }
+                        f
+                    }
+                    None => "csv".to_string(),
+                };
+                let has_header = args.bool("has_header").unwrap_or(false);
+                EvidenceKind::Table {
+                    dataset,
+                    format,
+                    has_header,
+                }
+            }
+            other => EvidenceKind::Extension {
+                kind: other.to_string(),
+                args,
+            },
         };
 
         Ok(EvidenceDecl {
@@ -1695,6 +1736,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_build_format() {
+        let src = r#"
+            build raw1 = binary("a.bin", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", arch: x86_64, load: 0x400000);
+            build pe1 = binary("a.exe", sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", arch: x86_64, format: pe);
+        "#;
+        let m = parse_model("t.dg", src).unwrap();
+        let formats: Vec<String> = m
+            .items
+            .iter()
+            .map(|i| match i {
+                Item::Build(b) => b.format.clone(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(formats, vec!["raw".to_string(), "pe".to_string()]);
+    }
+
+    #[test]
+    fn rejects_unknown_build_format() {
+        let src = r#"build b = binary("x", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", format: elf);"#;
+        assert!(parse_model("t.dg", src).is_err());
+    }
+
+    #[test]
+    fn parses_table_evidence() {
+        let src = r#"ev e := table(ds_ops, format: "csv", has_header: true);"#;
+        let m = parse_model("t.dg", src).unwrap();
+        match &m.items[0] {
+            Item::Evidence(ev) => match &ev.kind {
+                EvidenceKind::Table {
+                    dataset,
+                    format,
+                    has_header,
+                } => {
+                    assert_eq!(dataset, "ds_ops");
+                    assert_eq!(format, "csv");
+                    assert!(*has_header);
+                }
+                other => panic!("expected table evidence, got {other:?}"),
+            },
+            other => panic!("expected evidence, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn conflict_rejects_prefer_and_decision() {
         let src = r#"conflict C : A vs B prefer A decision D;"#;
         let err = parse_model("t.dg", src).unwrap_err();
@@ -1709,5 +1795,23 @@ mod tests {
         "#;
         let err = parse_model("t.dg", src).unwrap_err();
         assert!(err.contains("unknown delimiter"), "{err}");
+    }
+
+    #[test]
+    fn unknown_evidence_kinds_become_extensions() {
+        let src = r#"ev e := faketest(x, n: 3) |> unique;"#;
+        let m = parse_model("t.dg", src).unwrap();
+        match &m.items[0] {
+            Item::Evidence(ev) => match &ev.kind {
+                EvidenceKind::Extension { kind, args } => {
+                    assert_eq!(kind, "faketest");
+                    assert_eq!(args.positional_string(0).unwrap(), "x");
+                    assert_eq!(args.u64("n"), Some(3));
+                    assert!(ev.unique());
+                }
+                other => panic!("expected extension evidence, got {other:?}"),
+            },
+            other => panic!("expected evidence, got {other:?}"),
+        }
     }
 }

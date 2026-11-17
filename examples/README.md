@@ -129,6 +129,7 @@ as a hypothesis; it never seals below threshold.
 | `xs-state.txt` | 4-word xorshift128 state for the refutation |
 | `attack-samples.csv` | 240 rows of synthetic per-group mechanic metrics for the stats example |
 | `ids.bin`, `ids.txt`, `ids6.txt` | 5-byte opcode image and id universes for coverage/conflict examples |
+| `opcodes-sample.csv` | header + mixed int/string cells for the `table` evidence tests |
 | `trace.json` | external packet-field → function dataflow certificate |
 | `absence.json` | audited `.text` / time-window absence certificate |
 | `observability.json` | external connection/window observability certificate |
