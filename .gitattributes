@@ -1,4 +1,3 @@
 examples/fixtures/*.bin binary
 examples/fixtures/*.pcap binary
-adapter/examples/synthetic/*.bin binary
 *.dg text eol=lf

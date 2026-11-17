@@ -17,7 +17,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test
       - name: Checked examples
         run: |
           cargo run -q -- check examples/position/model.dg
@@ -29,7 +29,5 @@ jobs:
           cargo run -q -- check examples/conflicts/model.dg
           cargo run -q -- check examples/refute/model.dg
           cargo run -q -- port examples/port/model.dg --to b2 --json > /dev/null
-      - name: Checked adapter adapter model
-        run: cargo run -q -p deg-adapter -- check adapter/examples/synthetic/model.dg
       - name: Seal example
         run: cargo run -q -- seal examples/position/model.dg --out /tmp/deg-position.lock.json

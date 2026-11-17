@@ -5,10 +5,3 @@ version = 4
 [[package]]
 name = "deg"
 version = "0.1.0"
-
-[[package]]
-name = "deg-adapter"
-version = "0.1.0"
-dependencies = [
- "deg",
-]

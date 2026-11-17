@@ -174,10 +174,10 @@ Designed but not implemented (see [design](docs/design.md) and
 
 ## Scope and ethics
 
-DeG is a tool for **fair-use** reverse engineering, interoperability,
-security research, and anti-cheat evaluation. It is not a cheat, a memory
-editor, or a packet injector. It only *checks claims about artifacts you
-already have*; it does not attack a live service or bypass access controls.
+DeG is a tool for **fair-use** reverse engineering, interoperability, and
+preservation research. It is not a cheat, a memory editor, or a packet
+injector. It only *checks claims about artifacts you already have*; it does
+not attack a live service or bypass access controls.
 
 ## Documentation
 
@@ -187,8 +187,6 @@ already have*; it does not attack a live service or bypass access controls.
 - [Tutorial](docs/tutorial.md) — read, run, and extend a model.
 - [Examples](examples/README.md) — timing, RNG, conflict, and porting.
 - [Provenance](docs/source.md) — the design conversation that seeded the project.
-- [Applying DeG to adapterproject](docs/adapter-emulator.md) — a read-only assessment and pilot against `adapter-emulator`.
-- [adapter adapter](adapter/README.md) — the `deg-adapter` crate: `adaptervector`/`adapterframes`/`adapterbundle` evidence kinds, the `generate` lane, and the operator-local crosscheck.
 
 ## License
 

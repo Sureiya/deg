@@ -443,7 +443,7 @@ threshold with eyes open.
 #### Mean claims
 
 `mean` claims generalize certificate statistics from timing/loot to any numeric
-sample the researcher can lock into a dataset (adapterproject-style mechanics metrics):
+sample the researcher can lock into a dataset (game-mechanics metrics):
 
 ```dg
 dataset ds_atk = dataset("attack-samples.csv", sha256: "…", build: b1);
