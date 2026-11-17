@@ -188,6 +188,7 @@ already have*; it does not attack a live service or bypass access controls.
 - [Examples](examples/README.md) — timing, RNG, conflict, and porting.
 - [Provenance](docs/source.md) — the design conversation that seeded the project.
 - [Applying DeG to adapterproject](docs/adapter-emulator.md) — a read-only assessment and pilot against `adapter-emulator`.
+- [adapter adapter](adapter/README.md) — the `deg-adapter` crate: `adaptervector`/`adapterframes`/`adapterbundle` evidence kinds, the `generate` lane, and the operator-local crosscheck.
 
 ## License
 
