@@ -1402,7 +1402,9 @@ fn check_coverage_claim(
     }
     if covered_n != target {
         result.status = ClaimStatus::Hypothesis;
-        result.note = Some(format!("covered {covered_n}/{target} (target not met)"));
+        result.note = Some(format!(
+            "covered {covered_n}/{target}; dataset fully covered but the target is not met"
+        ));
         return result;
     }
     if min_strength < index.seal_threshold() {
@@ -1549,12 +1551,21 @@ fn check_refute(
                 .join(", ")
         );
         if rel_name == &key.rel && *vals == key.args {
-            result.status = ClaimStatus::Sealed;
-            // The evidence emitted the mismatch as a checked fact, so the
-            // refutation is never stronger than that evidence.
-            result.strength = Some(outcome.strength.min(Strength::Deterministic));
-            result.note =
-                Some("the evidence carries a `contradicts` fact matching the goal".into());
+            let strength = outcome.strength.min(Strength::Deterministic);
+            result.strength = Some(strength);
+            if strength < index.seal_threshold() {
+                // A weak contradiction is recorded but cannot seal: the
+                // evidence that carries it is below the seal threshold.
+                result.status = ClaimStatus::Hypothesis;
+                result.note = Some(format!(
+                    "strength {strength} is below the seal threshold {}; the contradiction is recorded but cannot seal",
+                    index.seal_threshold()
+                ));
+            } else {
+                result.status = ClaimStatus::Sealed;
+                result.note =
+                    Some("the evidence carries a `contradicts` fact matching the goal".into());
+            }
             return result;
         }
         available.push(shown);
@@ -2047,7 +2058,12 @@ pub fn lock_json(index: &ModelIndex, artifacts: &ArtifactSet, report: &CheckRepo
             m.insert("target".into(), Json::Num(cov.target as f64));
             m.insert(
                 "missing".into(),
-                Json::Arr(cov.missing.iter().map(|id| Json::Num(*id as f64)).collect()),
+                Json::Arr(
+                    cov.missing
+                        .iter()
+                        .map(|id| Json::Str(id.to_string()))
+                        .collect(),
+                ),
             );
         }
         match c.status {
@@ -2325,7 +2341,7 @@ mod tests {
     }
 
     #[test]
-    fn refute_seals_on_matching_contradicts_fact() {
+    fn refute_records_weak_contradiction_as_hypothesis() {
         let index = empty_index();
         let refute = refute_decl(Atom {
             name: "can_predict".into(),
@@ -2344,12 +2360,37 @@ mod tests {
         let mut outcomes = BTreeMap::new();
         outcomes.insert("e".to_string(), out);
         let result = check_refute(&index, &refute, &outcomes);
-        assert_eq!(result.status, ClaimStatus::Sealed, "{result:?}");
-        assert_eq!(
-            result.strength,
-            Some(Strength::Observational),
-            "external contradicts facts stay Observational"
+        assert_eq!(result.status, ClaimStatus::Hypothesis, "{result:?}");
+        assert_eq!(result.strength, Some(Strength::Observational));
+        let note = result.note.clone().unwrap();
+        assert!(
+            note.contains("below the seal threshold deterministic"),
+            "{note}"
         );
+    }
+
+    #[test]
+    fn refute_seals_deterministic_contradiction() {
+        let index = empty_index();
+        let refute = refute_decl(Atom {
+            name: "can_predict".into(),
+            args: vec![Term::Lit(Lit::Sym("conn_7".into()))],
+            span: span(),
+        });
+        let mut out = EvidenceOutcome::new("e", "external", Strength::Deterministic, "ok");
+        out.fact(
+            "contradicts",
+            vec![
+                Value::sym("e"),
+                Value::sym("can_predict"),
+                Value::list(vec![Value::sym("conn_7")]),
+            ],
+        );
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert("e".to_string(), out);
+        let result = check_refute(&index, &refute, &outcomes);
+        assert_eq!(result.status, ClaimStatus::Sealed, "{result:?}");
+        assert_eq!(result.strength, Some(Strength::Deterministic));
     }
 
     #[test]

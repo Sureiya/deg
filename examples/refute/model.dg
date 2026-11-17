@@ -1,7 +1,8 @@
 // Generalized refutation: any ground atom can be refuted when the evidence
 // carries a `contradicts(ev, rel, [args…])` fact. Here the contradiction
-// comes from an external certificate's generic facts array; the refutation
-// is capped at the evidence's Observational strength.
+// comes from an external certificate's generic facts array; at the default
+// Deterministic seal threshold the refutation is recorded as a hypothesis
+// (Observational contradictions cannot seal), never promoted.
 //
 // Run:
 //   deg check examples/refute/model.dg

@@ -295,7 +295,8 @@ claim is:
   the error), lacks a ground goal, leaves the family, or covers an ID outside
   the dataset;
 - **Hypothesis** if `missing ≠ ∅` (“covered N/T; missing: …”, up to 32 IDs
-  named) or if `|covered| ≠ T` (“covered N/T (target not met)”);
+  named) or if `|covered| ≠ T` (“covered N/T; dataset fully covered but the
+  target is not met”);
 - **Sealed** (or Provisional, propagating premise expiries) when
   `covered ⊇ ids(ds)` and `|covered| = T`.
 
@@ -362,12 +363,16 @@ Any other ground goal `φ = rel(v₁, …, vₙ)` is refuted when the evidence e
 contradicts(e, rel, [v₁, …, vₙ])
 ```
 
-with the goal's relation and argument list. The refutation then seals at
+with the goal's relation and argument list. The refutation is recorded at
 `min(s_E, Deterministic)`: core primitives may emit `contradicts` at their own
 strength in the future, while extensions can emit it today through an external
-certificate's generic `facts` array (capped at Observational). A refutation
-whose evidence carries no matching `contradicts` fact fails, listing the
-`contradicts` facts that were available.
+certificate's generic `facts` array (capped at Observational). When that
+strength is below the seal threshold the contradiction is **recorded as a
+hypothesis** with the note “strength … is below the seal threshold …; the
+contradiction is recorded but cannot seal” — it never seals, exactly like any
+other weak claim. A refutation whose evidence carries no matching
+`contradicts` fact fails, listing the `contradicts` facts that were available.
+A sealed refutation marks any claim with the same ground goal Refuted.
 
 ## 12. Port judgment
 

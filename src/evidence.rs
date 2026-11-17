@@ -999,6 +999,13 @@ fn eval_samples(
         let value: f64 = value_cell
             .parse()
             .map_err(|_| format!("row {} value {:?} is not a number", row_no + 1, value_cell))?;
+        if !value.is_finite() {
+            return Err(format!(
+                "row {} value {:?} is not finite",
+                row_no + 1,
+                value_cell
+            ));
+        }
         let group = match group_col {
             Some(g) => cells
                 .get(g)
@@ -1562,6 +1569,11 @@ fn parse_scope(scope: &str, text_start: u64, text_end: u64) -> Result<(u64, u64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{ArtifactDecl, ArtifactSet, LoadedArtifact};
+    use crate::ast::DatasetDecl;
+    use crate::lexer::Span;
+    use crate::semantic::ModelIndex;
+    use std::path::PathBuf;
 
     #[test]
     fn split_row_handles_all_delimiters() {
@@ -1591,5 +1603,84 @@ mod tests {
         assert!((g.median - 2.5).abs() < 1e-12);
         assert!((g.sd - 1.2909944487358056).abs() < 1e-12);
         assert!((g.ci95 - 1.96 * 1.2909944487358056 / 2.0).abs() < 1e-12);
+    }
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// Evaluate a `samples` evidence term against an inline dataset so the
+    /// real evaluator path (not just the helpers) is exercised. Failures are
+    /// reported through the outcome's `ok`/`error` fields, like in `check`.
+    fn eval_samples_inline(text: &str) -> EvidenceOutcome {
+        let model = crate::parser::parse_model(
+            "t.dg",
+            &format!(
+                "build b = binary(\"g.bin\", sha256: \"{SHA}\", arch: x86_64);\n\
+                 dataset ds = dataset(\"s.csv\", sha256: \"{SHA}\", build: b);\n\
+                 ev e := samples(ds, value: 0);\n"
+            ),
+        )
+        .unwrap();
+        let index = ModelIndex::new(&model).unwrap();
+        let decl = index.evidence.get("e").unwrap().clone();
+        let artifacts = ArtifactSet {
+            model_dir: PathBuf::from("."),
+            items: BTreeMap::from([(
+                "ds".to_string(),
+                LoadedArtifact {
+                    decl: ArtifactDecl::Dataset(DatasetDecl {
+                        name: "ds".into(),
+                        path: "s.csv".into(),
+                        sha256: SHA.into(),
+                        build: Some("b".into()),
+                        from: None,
+                        span: Span::new(1, 1, 0),
+                    }),
+                    resolved_path: PathBuf::from("s.csv"),
+                    bytes: text.as_bytes().to_vec(),
+                    actual_sha256: SHA.into(),
+                    verified: true,
+                    load_error: None,
+                },
+            )]),
+            errors: Vec::new(),
+        };
+        let ctx = EvalCtx {
+            index: &index,
+            artifacts: &artifacts,
+        };
+        evaluate(&ctx, &decl)
+    }
+
+    #[test]
+    fn samples_evidence_evaluates_inline_dataset() {
+        let out = eval_samples_inline("1.0\n2.0\n3.0\n");
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(out.kind, "samples");
+        match &out.measured {
+            Some(Measured::Samples { groups }) => {
+                let g = &groups[""];
+                assert_eq!(g.n, 3);
+                assert!((g.mean - 2.0).abs() < 1e-12);
+            }
+            other => panic!("wrong measured: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn samples_evidence_rejects_non_finite_values() {
+        for bad in ["1.0\nnan\n", "1.0\ninf\n", "1.0\n-inf\n"] {
+            let out = eval_samples_inline(bad);
+            assert!(!out.ok, "{bad}");
+            let err = out.error.unwrap();
+            assert!(err.contains("is not finite"), "{err}");
+        }
+    }
+
+    #[test]
+    fn samples_evidence_rejects_non_numeric_values() {
+        let out = eval_samples_inline("1.0\ntwelve\n");
+        assert!(!out.ok);
+        let err = out.error.unwrap();
+        assert!(err.contains("is not a number"), "{err}");
     }
 }

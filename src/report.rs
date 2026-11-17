@@ -171,12 +171,17 @@ pub fn print_check(report: &CheckReport, model: &str, strict: bool) {
     if !report.decisions.is_empty() {
         println!("\ndecisions:");
         for d in &report.decisions {
+            let digest = if d.sha256.is_empty() {
+                "(unreadable)".to_string()
+            } else {
+                d.sha256.clone()
+            };
             println!(
                 "  {:<24} prefer {} over {} sha256:{} {}{}",
                 d.name,
                 d.prefer,
                 d.over,
-                d.sha256,
+                digest,
                 if d.ok { "ok" } else { "MISMATCH" },
                 d.signer
                     .as_ref()
@@ -318,7 +323,12 @@ pub fn report_json(report: &CheckReport, index: &ModelIndex) -> Json {
                 m.insert("target".into(), Json::Num(cov.target as f64));
                 m.insert(
                     "missing".into(),
-                    Json::Arr(cov.missing.iter().map(|id| Json::Num(*id as f64)).collect()),
+                    Json::Arr(
+                        cov.missing
+                            .iter()
+                            .map(|id| Json::Str(id.to_string()))
+                            .collect(),
+                    ),
                 );
             }
             Json::Obj(m)

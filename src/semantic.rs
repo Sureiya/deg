@@ -370,7 +370,9 @@ impl ModelIndex {
             EvidenceKind::Rate { capture, .. } | EvidenceKind::Sample { capture, .. } => {
                 self.captures.get(capture).and_then(|c| c.build.clone())
             }
-            EvidenceKind::Samples { .. } => None,
+            EvidenceKind::Samples { dataset, .. } => {
+                self.datasets.get(dataset).and_then(|d| d.build.clone())
+            }
         }
     }
 
@@ -1204,6 +1206,47 @@ mod tests {
         assert!(
             errs.iter()
                 .any(|e| e.contains("refers to unknown dataset `missing`")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn samples_evidence_build_follows_dataset_binding() {
+        let src = format!(
+            r#"
+            build b1 = binary("g.bin", sha256: "{SHA}", arch: x86_64);
+            dataset ds = dataset("s.csv", sha256: "{SHA}", build: b1);
+            dataset ds2 = dataset("s2.csv", sha256: "{SHA}");
+            ev e := samples(ds, value: 0);
+            ev e2 := samples(ds2, value: 0);
+            "#
+        );
+        let m = parse_model("t.dg", &src).unwrap();
+        let idx = ModelIndex::new(&m).unwrap();
+        assert_eq!(
+            idx.evidence_build(&idx.evidence["e"]).as_deref(),
+            Some("b1")
+        );
+        assert_eq!(idx.evidence_build(&idx.evidence["e2"]), None);
+    }
+
+    #[test]
+    fn proof_using_cross_build_samples_evidence_is_rejected() {
+        let src = format!(
+            r#"
+            build b1 = binary("g.bin", sha256: "{SHA}", arch: x86_64);
+            build b2 = binary("h.bin", sha256: "{SHA}", arch: x86_64);
+            dataset ds = dataset("s.csv", sha256: "{SHA}", build: b1);
+            ev e := samples(ds, value: 0);
+            rule r: x(1) if samples_group(?e, ?g);
+            proof P : x(1) in b2 {{ evidence e; rules r; }}
+            "#
+        );
+        let m = parse_model("t.dg", &src).unwrap();
+        let errs = ModelIndex::new(&m).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("uses evidence `e` from build b1")),
             "{errs:?}"
         );
     }

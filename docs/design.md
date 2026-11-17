@@ -528,11 +528,13 @@ marks any claim with the same goal as `refuted`.
 
 Any other ground atom can be refuted through the generic extension point: if
 the evidence emits `contradicts(ev, rel, [args…])` with the goal's relation and
-argument list, the refutation seals at the evidence's strength capped by
-Deterministic (so external certificates refute at Observational). Core
-primitives may emit `contradicts` in the future; extensions can emit it today
-through an external certificate's generic `facts` array. Refutation is
-first-class because eliminating wrong models is often the real work.
+argument list, the refutation is recorded at the evidence's strength capped by
+Deterministic — core primitives may emit `contradicts` in the future, and
+extensions can emit it today through an external certificate's generic `facts`
+array. A contradiction weaker than the seal threshold (for example an external
+certificate at Observational) is recorded as a hypothesis, never sealed; a
+sealed refutation marks any claim with the same goal as `refuted`. Refutation
+is first-class because eliminating wrong models is often the real work.
 
 ### 9.6 Obligations
 

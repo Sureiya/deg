@@ -114,8 +114,9 @@ cargo run -q -- check examples/refute/model.dg
 ```
 
 A `contradicts(ev, rel, [args…])` fact — here carried by an external
-certificate's generic facts array — refutes an arbitrary ground atom. The
-refutation seals at the evidence's strength, capped by Deterministic.
+certificate's generic facts array — refutes an arbitrary ground atom. At the
+default Deterministic threshold the Observational contradiction is recorded
+as a hypothesis; it never seals below threshold.
 
 ## Fixtures
 

@@ -45,7 +45,8 @@ proof P_5 : opcode(5) in b1 { evidence e_b5; rules opcode_5; }
 claim C_cov : coverage(ds_ids, target: 5) in b1
   from P_1, P_2, P_3, P_4, P_5;
 
-// The same premises cover 5 ids, not the declared 82: Hypothesis.
+// The same premises cover 5 ids, not the declared 82: Hypothesis
+// ("covered 5/82; dataset fully covered but the target is not met").
 claim C_cov82 : coverage(ds_ids, target: 82) in b1
   from P_1, P_2, P_3, P_4, P_5;
 

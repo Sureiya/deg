@@ -300,7 +300,10 @@ fn coverage_example_checks_three_outcomes() {
     let text = stdout(&out);
     assert!(text.contains("C_cov "), "{text}");
     assert!(text.contains("5/5 covered; missing: none"), "{text}");
-    assert!(text.contains("covered 5/82 (target not met)"), "{text}");
+    assert!(
+        text.contains("covered 5/82; dataset fully covered but the target is not met"),
+        "{text}"
+    );
     assert!(text.contains("covered 5/6; missing: 0x6"), "{text}");
     let out = run(&["check", "examples/coverage/model.dg", "--json"]);
     assert!(out.status.success());
@@ -317,12 +320,10 @@ fn coverage_example_checks_three_outcomes() {
         .iter()
         .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("C_cov6"))
         .unwrap();
-    assert_eq!(
-        cov6.get("missing")
-            .and_then(|v| v.as_arr())
-            .map(|a| a.len()),
-        Some(1)
-    );
+    let missing = cov6.get("missing").and_then(|v| v.as_arr()).unwrap();
+    assert_eq!(missing.len(), 1);
+    // Large ids must survive JSON as decimal strings, not floats.
+    assert_eq!(missing[0].as_str(), Some("6"));
     assert_eq!(
         cov6.get("status").and_then(|v| v.as_str()),
         Some("hypothesis")
@@ -459,6 +460,7 @@ fn generalized_refutation_marks_matching_claims_refuted() {
     .unwrap();
     let src = format!(
         r#"
+        pragma seal_threshold = observational;
         build b1 = binary("{b1_path}", sha256: "{b1_sha}", arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
         ev e_pred := external("certs/pred.json", kind: pred, build: b1);
         ev e_contra := external("certs/contra.json", kind: contradicts, build: b1);
@@ -508,4 +510,11 @@ fn refute_example_checks() {
     let text = stdout(&out);
     assert!(text.contains("R_can_predict"), "{text}");
     assert!(text.contains("observational"), "{text}");
+    // The contradiction comes from Observational external evidence, so the
+    // refutation is a recorded hypothesis, not a seal.
+    assert!(text.contains("hypothesis"), "{text}");
+    assert!(
+        text.contains("the contradiction is recorded but cannot seal"),
+        "{text}"
+    );
 }
