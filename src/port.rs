@@ -272,6 +272,8 @@ pub fn port(index: &ModelIndex, artifacts: &ArtifactSet, target: &str) -> PortRe
             kind: match claim.head {
                 ClaimHead::Period { .. } => ClaimKind::Period,
                 ClaimHead::Uniform { .. } => ClaimKind::Uniform,
+                ClaimHead::Mean { .. } => ClaimKind::Mean,
+                ClaimHead::Coverage { .. } => ClaimKind::Coverage,
                 ClaimHead::Rel(_) => ClaimKind::Derived,
             },
             build: target.to_string(),
@@ -288,6 +290,7 @@ pub fn port(index: &ModelIndex, artifacts: &ArtifactSet, target: &str) -> PortRe
             conflict_with: Vec::new(),
             refuted_by: None,
             measured: None,
+            coverage: None,
         });
     }
 
@@ -618,6 +621,7 @@ fn port_proof(
                 conflict_with: Vec::new(),
                 refuted_by: None,
                 measured: None,
+                coverage: None,
             };
             if proof.expect.map(|e| strength < e).unwrap_or(false) {
                 cr.status = ClaimStatus::Failed;
@@ -797,6 +801,9 @@ fn port_evidence(
             } else {
                 Err(out.error.unwrap_or_else(|| "measurement failed".into()))
             }
+        }
+        EvidenceKind::Samples { .. } => {
+            Err("samples evidence is dataset-bound and not build-specific; re-declare it for the target if needed".into())
         }
         EvidenceKind::External { .. } => {
             Err("external certificate is build-bound; re-issue it for the target".into())

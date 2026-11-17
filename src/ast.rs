@@ -31,6 +31,7 @@ pub enum Item {
     Proof(ProofDecl),
     Claim(ClaimDecl),
     Conflict(ConflictDecl),
+    Decision(DecisionDecl),
     Obligation(ObligationDecl),
     Refute(RefuteDecl),
     Port(PortDecl),
@@ -56,6 +57,7 @@ impl Item {
             Item::Proof(_) => "proof",
             Item::Claim(_) => "claim",
             Item::Conflict(_) => "conflict",
+            Item::Decision(_) => "decision",
             Item::Obligation(_) => "obligation",
             Item::Refute(_) => "refute",
             Item::Port(_) => "port",
@@ -401,6 +403,12 @@ pub enum EvidenceKind {
         kind: String,
         build: String,
     },
+    Samples {
+        dataset: String,
+        value_col: usize,
+        group_col: Option<usize>,
+        delim: String,
+    },
     Symbols {
         build: String,
         path: String,
@@ -425,6 +433,7 @@ impl EvidenceKind {
             EvidenceKind::Rate { .. } => "rate",
             EvidenceKind::Sample { .. } => "sample",
             EvidenceKind::External { .. } => "external",
+            EvidenceKind::Samples { .. } => "samples",
             EvidenceKind::Symbols { .. } => "symbols",
             EvidenceKind::Absence { .. } => "absence",
         }
@@ -603,6 +612,15 @@ pub enum ClaimHead {
         dist: String,
         bins: u64,
     },
+    Mean {
+        metric: String,
+        value: f64,
+        eps: f64,
+    },
+    Coverage {
+        dataset: String,
+        target: u64,
+    },
 }
 
 impl ClaimHead {
@@ -620,6 +638,12 @@ impl ClaimHead {
                 crate::value::format_duration(*eps_us)
             ),
             ClaimHead::Uniform { dist, bins } => format!("uniform({dist}, bins:{bins})"),
+            ClaimHead::Mean { metric, value, eps } => {
+                format!("mean({metric}) ~ {value} +- {eps}")
+            }
+            ClaimHead::Coverage { dataset, target } => {
+                format!("coverage({dataset}, target:{target})")
+            }
         }
     }
 
@@ -628,6 +652,8 @@ impl ClaimHead {
             ClaimHead::Rel(_) => "relational",
             ClaimHead::Period { .. } => "period",
             ClaimHead::Uniform { .. } => "uniform",
+            ClaimHead::Mean { .. } => "mean",
+            ClaimHead::Coverage { .. } => "coverage",
         }
     }
 }
@@ -651,6 +677,9 @@ pub enum ClaimBody {
     Derived {
         from: Vec<String>,
     },
+    Coverage {
+        from: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -670,7 +699,22 @@ pub struct ConflictDecl {
     pub left: String,
     pub right: String,
     pub prefer: Option<String>,
+    pub decision: Option<String>,
     pub reason: Option<String>,
+    pub span: Span,
+}
+
+/// A hash-pinned human decision file that resolves a conflict. The file's
+/// bytes are content-addressed: the kernel re-hashes it at every check and a
+/// digest mismatch makes the decision unusable.
+#[derive(Debug, Clone)]
+pub struct DecisionDecl {
+    pub name: String,
+    pub path: String,
+    pub sha256: String,
+    pub prefer: String,
+    pub over: String,
+    pub signer: Option<String>,
     pub span: Span,
 }
 

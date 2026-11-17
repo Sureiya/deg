@@ -47,6 +47,19 @@ pub enum Measured {
         failed_at: Option<usize>,
         projection: String,
     },
+    Samples {
+        groups: BTreeMap<String, GroupStats>,
+    },
+}
+
+/// Per-group descriptive statistics of a `samples` dataset.
+#[derive(Debug, Clone)]
+pub struct GroupStats {
+    pub n: u64,
+    pub mean: f64,
+    pub median: f64,
+    pub sd: f64,
+    pub ci95: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -170,6 +183,12 @@ pub fn evaluate(ctx: &EvalCtx<'_>, decl: &EvidenceDecl) -> EvidenceOutcome {
             big_endian,
         } => eval_sample(ctx, decl, capture, *opcode, *field, *width, *big_endian),
         EvidenceKind::External { path, kind, build } => eval_external(ctx, decl, path, kind, build),
+        EvidenceKind::Samples {
+            dataset,
+            value_col,
+            group_col,
+            delim,
+        } => eval_samples(ctx, decl, dataset, *value_col, *group_col, delim),
         EvidenceKind::Symbols { build, path } => eval_symbols(ctx, decl, build, path),
         EvidenceKind::Absence {
             path,
@@ -946,6 +965,163 @@ fn eval_sample(
     Ok(out)
 }
 
+/// Evaluate a `samples(ds, value: …, group: …, delim: …)` evidence term:
+/// numeric samples from a content-addressed dataset, summarized per group.
+///
+/// The dataset rows are split on the declared delimiter; blank lines and
+/// `#` comments are skipped and cells are trimmed. The value cell is parsed
+/// as a float and the optional group cell names the group. When no group
+/// column is declared, all values form a single group named `""`.
+///
+/// Statistics (mean, median, sample sd with an n-1 denominator, and a 95%
+/// CI half-width of `1.96·sd/√n`) are emitted as milli-scaled integers so
+/// rules and reports can consume them. The strength is Observational.
+fn eval_samples(
+    ctx: &EvalCtx<'_>,
+    decl: &EvidenceDecl,
+    dataset: &str,
+    value_col: usize,
+    group_col: Option<usize>,
+    delim: &str,
+) -> Result<EvidenceOutcome, String> {
+    let text = ctx.artifacts.dataset_text(dataset)?;
+    let mut grouped: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for (row_no, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("");
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cells = split_row(line, delim);
+        let value_cell = cells
+            .get(value_col)
+            .ok_or_else(|| format!("row {} has no value column {}", row_no + 1, value_col))?;
+        let value: f64 = value_cell
+            .parse()
+            .map_err(|_| format!("row {} value {:?} is not a number", row_no + 1, value_cell))?;
+        if !value.is_finite() {
+            return Err(format!(
+                "row {} value {:?} is not finite",
+                row_no + 1,
+                value_cell
+            ));
+        }
+        let group = match group_col {
+            Some(g) => cells
+                .get(g)
+                .ok_or_else(|| format!("row {} has no group column {g}", row_no + 1))?
+                .to_string(),
+            None => String::new(),
+        };
+        grouped.entry(group).or_default().push(value);
+    }
+    if grouped.is_empty() {
+        return Err(format!("dataset `{dataset}` contains no sample rows"));
+    }
+
+    let mut groups = BTreeMap::new();
+    for (name, values) in &grouped {
+        let n = values.len() as u64;
+        let mean = stats::mean(values);
+        let median = stats::median(values);
+        let (sd, ci95) = if n >= 2 {
+            let sd = stats::sample_sd(values);
+            (sd, 1.96 * sd / (n as f64).sqrt())
+        } else {
+            (0.0, 0.0)
+        };
+        groups.insert(
+            name.clone(),
+            GroupStats {
+                n,
+                mean,
+                median,
+                sd,
+                ci95,
+            },
+        );
+    }
+
+    let total: u64 = grouped.values().map(|v| v.len() as u64).sum();
+    let mut out = EvidenceOutcome::new(
+        &decl.name,
+        "samples",
+        Strength::Observational,
+        format!("{} group(s), {total} total samples", groups.len()),
+    );
+    for (name, g) in &groups {
+        out.fact(
+            "samples_group",
+            vec![Value::sym(&decl.name), Value::sym(name)],
+        );
+        out.fact(
+            "samples_n",
+            vec![
+                Value::sym(&decl.name),
+                Value::sym(name),
+                Value::Int(g.n as i128),
+            ],
+        );
+        out.fact(
+            "samples_mean_milli",
+            vec![
+                Value::sym(&decl.name),
+                Value::sym(name),
+                Value::Int((g.mean * 1000.0).round() as i128),
+            ],
+        );
+        out.fact(
+            "samples_median_milli",
+            vec![
+                Value::sym(&decl.name),
+                Value::sym(name),
+                Value::Int((g.median * 1000.0).round() as i128),
+            ],
+        );
+        out.fact(
+            "samples_sd_milli",
+            vec![
+                Value::sym(&decl.name),
+                Value::sym(name),
+                Value::Int((g.sd * 1000.0).round() as i128),
+            ],
+        );
+        out.fact(
+            "samples_ci_milli",
+            vec![
+                Value::sym(&decl.name),
+                Value::sym(name),
+                Value::Int((g.ci95 * 1000.0).round() as i128),
+            ],
+        );
+        out.detail(
+            &format!("group_{name}"),
+            format!(
+                "n={} mean={:.3} median={:.3} sd={:.3} ci95={:.3}",
+                g.n, g.mean, g.median, g.sd, g.ci95
+            ),
+        );
+        if g.n < 2 {
+            out.detail(
+                &format!("group_{name}_ci"),
+                "only one sample; the 95% CI half-width is 0",
+            );
+        }
+    }
+    out.measured = Some(Measured::Samples { groups });
+    Ok(out)
+}
+
+/// Split one dataset row on the declared delimiter. CSV/TSV split on the
+/// separator and trim each cell; `ws` splits on any whitespace run.
+fn split_row(line: &str, delim: &str) -> Vec<String> {
+    match delim {
+        "tsv" => line.split('\t').map(|c| c.trim().to_string()).collect(),
+        "ws" => line.split_whitespace().map(str::to_string).collect(),
+        _ => line.split(',').map(|c| c.trim().to_string()).collect(),
+    }
+}
+
 fn eval_external(
     ctx: &EvalCtx<'_>,
     decl: &EvidenceDecl,
@@ -1388,4 +1564,123 @@ fn parse_scope(scope: &str, text_start: u64, text_end: u64) -> Result<(u64, u64)
     let start = parse_u64(a).ok_or_else(|| format!("invalid scope start {a:?}"))?;
     let end = parse_u64(b).ok_or_else(|| format!("invalid scope end {b:?}"))?;
     Ok((start, end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifact::{ArtifactDecl, ArtifactSet, LoadedArtifact};
+    use crate::ast::DatasetDecl;
+    use crate::lexer::Span;
+    use crate::semantic::ModelIndex;
+    use std::path::PathBuf;
+
+    #[test]
+    fn split_row_handles_all_delimiters() {
+        assert_eq!(split_row("1.5, club", "csv"), vec!["1.5", "club"]);
+        assert_eq!(split_row("1.5\tclub", "tsv"), vec!["1.5", "club"]);
+        assert_eq!(split_row("  1.5  club ", "ws"), vec!["1.5", "club"]);
+        assert_eq!(split_row(" 1.5 , club , ", "csv"), vec!["1.5", "club", ""]);
+    }
+
+    #[test]
+    fn group_stats_are_computed_correctly() {
+        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let n = values.len() as u64;
+        let mean = stats::mean(&values);
+        let median = stats::median(&values);
+        let sd = stats::sample_sd(&values);
+        let ci95 = 1.96 * sd / (n as f64).sqrt();
+        let g = GroupStats {
+            n,
+            mean,
+            median,
+            sd,
+            ci95,
+        };
+        assert_eq!(g.n, 4);
+        assert!((g.mean - 2.5).abs() < 1e-12);
+        assert!((g.median - 2.5).abs() < 1e-12);
+        assert!((g.sd - 1.2909944487358056).abs() < 1e-12);
+        assert!((g.ci95 - 1.96 * 1.2909944487358056 / 2.0).abs() < 1e-12);
+    }
+
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    /// Evaluate a `samples` evidence term against an inline dataset so the
+    /// real evaluator path (not just the helpers) is exercised. Failures are
+    /// reported through the outcome's `ok`/`error` fields, like in `check`.
+    fn eval_samples_inline(text: &str) -> EvidenceOutcome {
+        let model = crate::parser::parse_model(
+            "t.dg",
+            &format!(
+                "build b = binary(\"g.bin\", sha256: \"{SHA}\", arch: x86_64);\n\
+                 dataset ds = dataset(\"s.csv\", sha256: \"{SHA}\", build: b);\n\
+                 ev e := samples(ds, value: 0);\n"
+            ),
+        )
+        .unwrap();
+        let index = ModelIndex::new(&model).unwrap();
+        let decl = index.evidence.get("e").unwrap().clone();
+        let artifacts = ArtifactSet {
+            model_dir: PathBuf::from("."),
+            items: BTreeMap::from([(
+                "ds".to_string(),
+                LoadedArtifact {
+                    decl: ArtifactDecl::Dataset(DatasetDecl {
+                        name: "ds".into(),
+                        path: "s.csv".into(),
+                        sha256: SHA.into(),
+                        build: Some("b".into()),
+                        from: None,
+                        span: Span::new(1, 1, 0),
+                    }),
+                    resolved_path: PathBuf::from("s.csv"),
+                    bytes: text.as_bytes().to_vec(),
+                    actual_sha256: SHA.into(),
+                    verified: true,
+                    load_error: None,
+                },
+            )]),
+            errors: Vec::new(),
+        };
+        let ctx = EvalCtx {
+            index: &index,
+            artifacts: &artifacts,
+        };
+        evaluate(&ctx, &decl)
+    }
+
+    #[test]
+    fn samples_evidence_evaluates_inline_dataset() {
+        let out = eval_samples_inline("1.0\n2.0\n3.0\n");
+        assert!(out.ok, "{:?}", out.error);
+        assert_eq!(out.kind, "samples");
+        match &out.measured {
+            Some(Measured::Samples { groups }) => {
+                let g = &groups[""];
+                assert_eq!(g.n, 3);
+                assert!((g.mean - 2.0).abs() < 1e-12);
+            }
+            other => panic!("wrong measured: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn samples_evidence_rejects_non_finite_values() {
+        for bad in ["1.0\nnan\n", "1.0\ninf\n", "1.0\n-inf\n"] {
+            let out = eval_samples_inline(bad);
+            assert!(!out.ok, "{bad}");
+            let err = out.error.unwrap();
+            assert!(err.contains("is not finite"), "{err}");
+        }
+    }
+
+    #[test]
+    fn samples_evidence_rejects_non_numeric_values() {
+        let out = eval_samples_inline("1.0\ntwelve\n");
+        assert!(!out.ok);
+        let err = out.error.unwrap();
+        assert!(err.contains("is not a number"), "{err}");
+    }
 }

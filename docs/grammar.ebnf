@@ -7,7 +7,8 @@ item            = pragma | build-decl | capture-decl | dump-decl
                 | dataset-decl | clock-decl | relate-decl
                 | struct-decl | packet-decl | fn-decl | rng-decl
                 | dist-decl | evidence-decl | rule-decl | proof-decl
-                | claim-decl | conflict-decl | obligation-decl
+                | claim-decl | conflict-decl | decision-decl
+                | obligation-decl
                 | refute-decl | port-decl ;
 
 pragma          = "pragma" ident "=" value ";" ;
@@ -87,7 +88,7 @@ dist-decl       = "dist" ident "in" ident "{"
 evidence-decl   = "ev" ident ":=" evidence-kind args { "|>" ident } ";" ;
 evidence-kind   = "scan" | "bytes" | "decode" | "constants" | "modulo"
                 | "recovery" | "rate" | "sample" | "external"
-                | "symbols" | "absence" ;
+                | "samples" | "symbols" | "absence" ;
 
 ; Kind-specific argument shapes:
 ;   scan       positional build, section, pattern
@@ -101,6 +102,8 @@ evidence-kind   = "scan" | "bytes" | "decode" | "constants" | "modulo"
 ;   sample     positional capture; opcode: int; field: int; width: int;
 ;              endian: "be" | "le"
 ;   external   positional path; kind: name; build: ref
+;   samples    positional dataset; value: int; group: int;
+;              delim: "csv" | "tsv" | "ws"
 ;   symbols    positional build, path
 ;   absence    positional path; build: ref; scope: string; during: ref
 
@@ -131,23 +134,37 @@ claim-decl      = "claim" ident ":" claim-head "in" ident
                     claim-body ";" ;
 claim-head      = atom
                 | period-head
-                | uniform-head ;
+                | uniform-head
+                | mean-head
+                | coverage-head ;
 period-head     = ( "period" | "tick_rate" ) "(" ident ","
                     "stream" ":" int ")" "~" duration "±" duration ;
 uniform-head    = "uniform" "(" ident "," "bins" ":" int ")" ;
+mean-head       = "mean" "(" ( ident | string ) ")" "~" float "±" float ;
+coverage-head   = "coverage" "(" ident "," "target" ":" int ")" ;
 claim-body      = "by" ident [ "require" requirement { "," requirement } ]
                 | "from" ident { "," ident } ;
+; Note: a "from" body on a coverage head is a coverage body; on any other
+; head it is a derived body.
 requirement     = "coverage" ">=" duration
                 | ( "alpha" | "power" | "delta" ) ( ":" | "=" ) float
                 | "confidence" ">=" float
                 | "samples" ">=" int ;
 
-; ── conflicts, obligations, refutations, ports ───────────────────────────
+; ── conflicts, decisions, obligations, refutations, ports ─────────────────
 
 conflict-decl   = "conflict" ident ":" ident "vs" ident
-                    [ "prefer" ident ]
-                    [ "reason" string ]
+                    { conflict-clause }
                     ";" ;
+conflict-clause = "prefer" ident
+                | "decision" ident
+                | "reason" string ;
+                ; `prefer` and `decision` are mutually exclusive; clauses may
+                ; appear in any order.
+
+decision-decl   = "decision" ident ":=" "decision" args ";" ;
+                ; args: positional path; sha256: hex64; prefer: ref;
+                ; over: ref; signer: string
 
 obligation-decl = "obligation" ident ":" atom "priority" ":" priority
                     [ "blocks" ":" "seal" ] ";"

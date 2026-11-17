@@ -1,0 +1,18 @@
+{
+  "kind": "contradicts",
+  "build": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  "tool": "fixture-auditor 0.1",
+  "note": "A generic contradiction fact: the auditor checked that can_predict(conn_7) does not hold.",
+  "facts": [
+    {
+      "rel": "contradicts",
+      "args": [
+        "e_contra",
+        "can_predict",
+        [
+          "conn_7"
+        ]
+      ]
+    }
+  ]
+}

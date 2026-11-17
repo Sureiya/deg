@@ -58,6 +58,7 @@ impl<'a> Parser<'a> {
             "proof" => self.proof(span).map(Item::Proof),
             "claim" => self.claim(span).map(Item::Claim),
             "conflict" => self.conflict(span).map(Item::Conflict),
+            "decision" => self.decision(span).map(Item::Decision),
             "obligation" => self.obligation(span).map(Item::Obligation),
             "refute" => self.refute(span).map(Item::Refute),
             "port" => self.port(span).map(Item::Port),
@@ -598,6 +599,27 @@ impl<'a> Parser<'a> {
                 let build = self.need_string(&args, "build", "certificate build", span)?;
                 EvidenceKind::External { path, kind, build }
             }
+            "samples" => {
+                let dataset = self.need_pos_string(&args, 0, "samples dataset", span)?;
+                let value_col = args
+                    .u64("value")
+                    .ok_or_else(|| self.err(span, "samples requires `value:`"))?
+                    as usize;
+                let group_col = args.u64("group").map(|g| g as usize);
+                let delim = args.string("delim").unwrap_or_else(|| "csv".to_string());
+                if !matches!(delim.as_str(), "csv" | "tsv" | "ws") {
+                    return Err(self.err(
+                        span,
+                        format!("unknown delimiter `{delim}` (expected csv, tsv, or ws)"),
+                    ));
+                }
+                EvidenceKind::Samples {
+                    dataset,
+                    value_col,
+                    group_col,
+                    delim,
+                }
+            }
             "symbols" => {
                 let build = self.need_pos_string(&args, 0, "symbols build", span)?;
                 let path = self.need_pos_string(&args, 1, "symbols path", span)?;
@@ -739,6 +761,38 @@ impl<'a> Parser<'a> {
                 self.expect(Token::RParen)?;
                 ClaimHead::Uniform { dist, bins }
             }
+            "mean" => {
+                self.expect(Token::LParen)?;
+                // The metric is a group symbol from `samples` evidence. A
+                // string is accepted so a group-less evidence term (whose
+                // single group is named "") can be claimed as mean("").
+                let metric = match self.peek().clone() {
+                    Token::Ident(_) => self.ident()?,
+                    Token::Str(_) => self.string()?,
+                    other => {
+                        return Err(self.err(
+                            head_span,
+                            format!("expected a metric name, found {}", other.describe()),
+                        ))
+                    }
+                };
+                self.expect(Token::RParen)?;
+                self.expect(Token::Tilde)?;
+                let value = self.float()?;
+                self.expect(Token::PlusMinus)?;
+                let eps = self.float()?;
+                ClaimHead::Mean { metric, value, eps }
+            }
+            "coverage" => {
+                self.expect(Token::LParen)?;
+                let dataset = self.ident()?;
+                self.expect(Token::Comma)?;
+                self.expect_ident("target")?;
+                self.expect(Token::Colon)?;
+                let target = self.u64()?;
+                self.expect(Token::RParen)?;
+                ClaimHead::Coverage { dataset, target }
+            }
             _ => ClaimHead::Rel(self.atom_from(head_name)?),
         };
         self.expect_ident("in")?;
@@ -777,8 +831,11 @@ impl<'a> Parser<'a> {
             }
             ClaimBody::Direct { evidence, requires }
         } else if self.eat_ident("from") {
-            ClaimBody::Derived {
-                from: self.name_list()?,
+            let from = self.name_list()?;
+            if matches!(&head, ClaimHead::Coverage { .. }) {
+                ClaimBody::Coverage { from }
+            } else {
+                ClaimBody::Derived { from }
             }
         } else {
             return Err(self.err(
@@ -842,23 +899,78 @@ impl<'a> Parser<'a> {
         let left = self.ident()?;
         self.expect_ident("vs")?;
         let right = self.ident()?;
-        let prefer = if self.eat_ident("prefer") {
-            Some(self.ident()?)
-        } else {
-            None
-        };
-        let reason = if self.eat_ident("reason") {
-            Some(self.string()?)
-        } else {
-            None
-        };
+        let mut prefer = None;
+        let mut decision = None;
+        let mut reason = None;
+        while !self.at(Token::Semi) {
+            if self.eat_ident("prefer") {
+                if prefer.is_some() {
+                    return Err(self.err(span, format!("conflict {name} has duplicate `prefer`")));
+                }
+                prefer = Some(self.ident()?);
+            } else if self.eat_ident("decision") {
+                if decision.is_some() {
+                    return Err(self.err(span, format!("conflict {name} has duplicate `decision`")));
+                }
+                decision = Some(self.ident()?);
+            } else if self.eat_ident("reason") {
+                if reason.is_some() {
+                    return Err(self.err(span, format!("conflict {name} has duplicate `reason`")));
+                }
+                reason = Some(self.string()?);
+            } else {
+                return Err(self.err(
+                    self.span(),
+                    format!(
+                        "expected `prefer`, `decision`, or `reason`, found {}",
+                        self.peek().describe()
+                    ),
+                ));
+            }
+        }
+        if prefer.is_some() && decision.is_some() {
+            return Err(self.err(
+                span,
+                format!("conflict {name} has both prefer and decision"),
+            ));
+        }
         self.expect(Token::Semi)?;
         Ok(ConflictDecl {
             name,
             left,
             right,
             prefer,
+            decision,
             reason,
+            span,
+        })
+    }
+
+    fn decision(&mut self, span: Span) -> Result<DecisionDecl, String> {
+        let name = self.ident()?;
+        self.expect(Token::ColonEq)?;
+        let kind = self.ident()?;
+        if kind != "decision" {
+            return Err(self.err(
+                span,
+                format!("decision must be `decision(...)`, found `{kind}`"),
+            ));
+        }
+        let args = self.args()?;
+        self.expect(Token::Semi)?;
+        let path = self.need_pos_string(&args, 0, "decision path", span)?;
+        let sha256 = self.need_string(&args, "sha256", "decision digest", span)?;
+        validate_sha256(&sha256, &self.path, span)?;
+        let prefer = self.need_string(&args, "prefer", "preferred claim", span)?;
+        let over = self.need_string(&args, "over", "overridden claim", span)?;
+        let signer = args.string("signer");
+        Ok(DecisionDecl {
+            name,
+            path,
+            sha256,
+            prefer,
+            over,
+            signer,
             span,
         })
     }
@@ -1488,5 +1600,114 @@ mod tests {
         let src = r#"port from b1 to b2 { rebase read_position by structural_similarity(64) min 0.6; drop e_old; }"#;
         let m = parse_model("t.dg", src).unwrap();
         assert!(matches!(m.items[0], Item::Port(_)));
+    }
+
+    #[test]
+    fn parses_samples_evidence_and_mean_claim() {
+        let src = r#"
+            build b1 = binary("g.bin", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", arch: x86_64);
+            dataset ds = dataset("s.csv", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", build: b1);
+            ev e := samples(ds, value: 0, group: 1, delim: "csv");
+            claim C : mean(atk_damage) ~ 42.5 ± 1.2 in b1
+              by e require samples >= 200, confidence >= 0.95, power: 0.8, delta: 2.0;
+        "#;
+        let m = parse_model("t.dg", src).unwrap();
+        match &m.items[2] {
+            Item::Evidence(ev) => match &ev.kind {
+                EvidenceKind::Samples {
+                    dataset,
+                    value_col,
+                    group_col,
+                    delim,
+                } => {
+                    assert_eq!(dataset, "ds");
+                    assert_eq!(*value_col, 0);
+                    assert_eq!(*group_col, Some(1));
+                    assert_eq!(delim, "csv");
+                }
+                other => panic!("wrong evidence kind: {other:?}"),
+            },
+            other => panic!("wrong item: {other:?}"),
+        }
+        match &m.items[3] {
+            Item::Claim(c) => match &c.head {
+                ClaimHead::Mean { metric, value, eps } => {
+                    assert_eq!(metric, "atk_damage");
+                    assert!((*value - 42.5).abs() < 1e-9);
+                    assert!((*eps - 1.2).abs() < 1e-9);
+                }
+                other => panic!("wrong claim head: {other:?}"),
+            },
+            other => panic!("wrong item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_coverage_claim() {
+        let src = r#"
+            build b1 = binary("g.bin", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", arch: x86_64);
+            claim C : coverage(ds_ids, target: 82) in b1 from P_1, P_2;
+        "#;
+        let m = parse_model("t.dg", src).unwrap();
+        match &m.items[1] {
+            Item::Claim(c) => {
+                assert!(matches!(
+                    &c.head,
+                    ClaimHead::Coverage {
+                        dataset,
+                        target: 82
+                    } if dataset == "ds_ids"
+                ));
+                assert!(matches!(
+                    &c.body,
+                    ClaimBody::Coverage { from } if from == &["P_1".to_string(), "P_2".to_string()]
+                ));
+            }
+            other => panic!("wrong item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_conflict_with_decision_and_decision_decl() {
+        let src = r#"
+            conflict C : A vs B decision D reason "see the decision file";
+            decision D := decision("decisions/d.txt", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", prefer: A, over: B, signer: "auditor");
+        "#;
+        let m = parse_model("t.dg", src).unwrap();
+        match &m.items[0] {
+            Item::Conflict(c) => {
+                assert_eq!(c.decision.as_deref(), Some("D"));
+                assert_eq!(c.prefer, None);
+                assert_eq!(c.reason.as_deref(), Some("see the decision file"));
+            }
+            other => panic!("wrong item: {other:?}"),
+        }
+        match &m.items[1] {
+            Item::Decision(d) => {
+                assert_eq!(d.name, "D");
+                assert_eq!(d.path, "decisions/d.txt");
+                assert_eq!(d.prefer, "A");
+                assert_eq!(d.over, "B");
+                assert_eq!(d.signer.as_deref(), Some("auditor"));
+            }
+            other => panic!("wrong item: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_rejects_prefer_and_decision() {
+        let src = r#"conflict C : A vs B prefer A decision D;"#;
+        let err = parse_model("t.dg", src).unwrap_err();
+        assert!(err.contains("has both prefer and decision"), "{err}");
+    }
+
+    #[test]
+    fn samples_evidence_rejects_unknown_delim() {
+        let src = r#"
+            build b1 = binary("g.bin", sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", arch: x86_64);
+            ev e := samples(ds, value: 0, delim: "psv");
+        "#;
+        let err = parse_model("t.dg", src).unwrap_err();
+        assert!(err.contains("unknown delimiter"), "{err}");
     }
 }

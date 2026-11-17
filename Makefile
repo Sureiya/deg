@@ -19,6 +19,10 @@ check:
 	cargo run -q -- check examples/timing/model.dg
 	cargo run -q -- check examples/rng/model.dg
 	cargo run -q -- check examples/loot/model.dg
+	cargo run -q -- check examples/stats/model.dg
+	cargo run -q -- check examples/coverage/model.dg
+	cargo run -q -- check examples/conflicts/model.dg
+	cargo run -q -- check examples/refute/model.dg
 	cargo run -q -- port examples/port/model.dg --to b2 > /dev/null
 
 fixtures:

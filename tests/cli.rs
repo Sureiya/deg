@@ -266,3 +266,255 @@ fn strict_seal_refuses_hypotheses() {
     assert!(!out.status.success());
     assert!(stderr(&out).contains("only hypotheses"), "{}", stderr(&out));
 }
+
+// ── samples evidence and mean claims ──────────────────────────────────────
+
+#[test]
+fn stats_example_checks_mean_claims() {
+    let out = run(&["check", "examples/stats/model.dg"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("C_club_mean"), "{text}");
+    assert!(text.contains("provisional"), "{text}");
+    assert!(text.contains("mean(club) ~ 42"), "{text}");
+    assert!(text.contains("underpowered"), "{text}");
+}
+
+#[test]
+fn tight_mean_tolerance_is_rejected() {
+    let src = fs::read_to_string("examples/stats/model.dg").unwrap();
+    // 0.2 is inside the measured |mean - 42| (0.13) but far tighter than the
+    // evidence CI (0.36): the kernel must reject it.
+    let path = temp_model("stats-tight", &src, &[("± 1.2", "± 0.2")]);
+    let out = run(&["check", path.to_str().unwrap()]);
+    assert!(!out.status.success(), "stdout: {}", stdout(&out));
+    assert!(stdout(&out).contains("tighter than"), "{}", stdout(&out));
+}
+
+// ── coverage claims ───────────────────────────────────────────────────────
+
+#[test]
+fn coverage_example_checks_three_outcomes() {
+    let out = run(&["check", "examples/coverage/model.dg"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("C_cov "), "{text}");
+    assert!(text.contains("5/5 covered; missing: none"), "{text}");
+    assert!(
+        text.contains("covered 5/82; dataset fully covered but the target is not met"),
+        "{text}"
+    );
+    assert!(text.contains("covered 5/6; missing: 0x6"), "{text}");
+    let out = run(&["check", "examples/coverage/model.dg", "--json"]);
+    assert!(out.status.success());
+    let json = parse_json(&stdout(&out)).unwrap();
+    let claims = json.get("claims").unwrap().as_arr().unwrap();
+    let cov = claims
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("C_cov"))
+        .unwrap();
+    assert_eq!(cov.get("covered").and_then(|v| v.as_u64()), Some(5));
+    assert_eq!(cov.get("target").and_then(|v| v.as_u64()), Some(5));
+    assert_eq!(cov.get("status").and_then(|v| v.as_str()), Some("sealed"));
+    let cov6 = claims
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("C_cov6"))
+        .unwrap();
+    let missing = cov6.get("missing").and_then(|v| v.as_arr()).unwrap();
+    assert_eq!(missing.len(), 1);
+    // Large ids must survive JSON as decimal strings, not floats.
+    assert_eq!(missing[0].as_str(), Some("6"));
+    assert_eq!(
+        cov6.get("status").and_then(|v| v.as_str()),
+        Some("hypothesis")
+    );
+}
+
+// ── generic conflicts and decisions ───────────────────────────────────────
+
+#[test]
+fn conflicts_example_resolves_prefer_and_decision() {
+    let out = run(&["check", "examples/conflicts/model.dg"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("conflicts   2 (0 unresolved)"), "{text}");
+    assert!(text.contains("demoted by conflict C_v"), "{text}");
+    assert!(text.contains("demoted by conflict C_dec"), "{text}");
+    assert!(text.contains("decisions   1 (1 ok)"), "{text}");
+}
+
+#[test]
+fn decision_digest_mismatch_breaks_resolution_and_seal() {
+    let src = fs::read_to_string("examples/conflicts/model.dg").unwrap();
+    let path = temp_model(
+        "conflicts-bad-decision",
+        &src,
+        &[(
+            "8ceafe95256a677ca37f121f1ca9b10f49db72482d85b0fa19210fce8c4b06b6",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )],
+    );
+    // The decision path is relative to the model directory, so mirror the
+    // real decision file there; only the declared digest is wrong.
+    let dec_dir = tmp_dir().join("decisions");
+    fs::create_dir_all(&dec_dir).unwrap();
+    fs::copy(
+        "examples/conflicts/decisions/prefer_d.txt",
+        dec_dir.join("prefer_d.txt"),
+    )
+    .unwrap();
+    let check = run(&["check", path.to_str().unwrap()]);
+    assert!(!check.status.success());
+    let text = stdout(&check);
+    assert!(text.contains("decision D_cd: digest mismatch"), "{text}");
+    assert!(text.contains("UNRESOLVED"), "{text}");
+
+    let seal = run(&[
+        "seal",
+        path.to_str().unwrap(),
+        "--out",
+        "target/test-tmp/bad-decision.lock.json",
+    ]);
+    assert!(!seal.status.success());
+    assert!(
+        stderr(&seal).contains("digest mismatch"),
+        "{}",
+        stderr(&seal)
+    );
+}
+
+#[test]
+fn decision_file_written_by_the_test_resolves_a_conflict() {
+    use deg::sha256::sha256_hex;
+    // The decision file is written next to the temp model; the digest is
+    // computed with deg's own sha256 module.
+    let dir = tmp_dir().join("decision-resolve");
+    fs::create_dir_all(&dir).unwrap();
+    let decision = b"Decision: prefer P_b over P_a\nSigner: test-runner\n";
+    fs::write(dir.join("decision.txt"), decision).unwrap();
+    let sha = sha256_hex(decision);
+
+    let src = r#"
+        build b1 = binary("{b1}", sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6", arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+        dump ids_bin = dump("{ids}", sha256: "74f81fe167d99b4cb41d6d0ccda82278caee9f3e2f25d5e5a3936ff3dcec60d0", base: 0, build: b1);
+        ev e_b1 := bytes(ids_bin, at: 0, expect: "01");
+        ev e_b2 := bytes(ids_bin, at: 1, expect: "02");
+        rule version_1: version(1) if bytes_ok(?e, 0x0);
+        rule version_2: version(2) if bytes_ok(?e, 0x1);
+        proof P_a : version(1) in b1 { evidence e_b1; rules version_1; }
+        proof P_b : version(2) in b1 { evidence e_b2; rules version_2; }
+        decision D := decision("decision.txt", sha256: "{sha}", prefer: P_b, over: P_a, signer: "test-runner");
+        conflict C : P_a vs P_b decision D reason "resolved by the test decision";
+    "#
+    .replace(
+        "{b1}",
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/fixtures/game-b1.bin")
+            .display()
+            .to_string(),
+    )
+    .replace(
+        "{ids}",
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/fixtures/ids.bin")
+            .display()
+            .to_string(),
+    )
+    .replace("{sha}", &sha);
+    let model = dir.join("model.dg");
+    fs::write(&model, src).unwrap();
+    let out = run(&["check", model.to_str().unwrap()]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("0 unresolved"), "{text}");
+    assert!(text.contains("demoted by conflict C"), "{text}");
+    assert!(text.contains("via decision D"), "{text}");
+}
+
+// ── generalized refutation ────────────────────────────────────────────────
+
+#[test]
+fn generalized_refutation_marks_matching_claims_refuted() {
+    let dir = tmp_dir().join("refute-general");
+    fs::create_dir_all(&dir).unwrap();
+    let b1 = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/fixtures/game-b1.bin");
+    let b1_path = b1.display().to_string();
+    let b1_sha = "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6";
+    let certs = dir.join("certs");
+    fs::create_dir_all(&certs).unwrap();
+    fs::write(
+        certs.join("pred.json"),
+        format!(
+            "{{\"kind\": \"pred\", \"build\": \"{b1_sha}\", \"tool\": \"test\", \
+             \"facts\": [{{\"rel\": \"pred_ev\", \"args\": [\"e_pred\", 1, \"x\"]}}]}}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        certs.join("contra.json"),
+        format!(
+            "{{\"kind\": \"contradicts\", \"build\": \"{b1_sha}\", \"tool\": \"test\", \
+             \"facts\": [{{\"rel\": \"contradicts\", \"args\": [\"e_contra\", \"pred\", [1, \"x\"]]}}]}}\n"
+        ),
+    )
+    .unwrap();
+    let src = format!(
+        r#"
+        pragma seal_threshold = observational;
+        build b1 = binary("{b1_path}", sha256: "{b1_sha}", arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+        ev e_pred := external("certs/pred.json", kind: pred, build: b1);
+        ev e_contra := external("certs/contra.json", kind: contradicts, build: b1);
+        rule r_pred: pred(?n, ?s) if pred_ev(?e, ?n, ?s);
+        proof P_pred : pred(1, x) in b1 {{ evidence e_pred; rules r_pred; }}
+        refute R_pred : pred(1, x) in b1 by e_contra;
+        "#
+    );
+    let model = dir.join("model.dg");
+    fs::write(&model, src).unwrap();
+
+    let out = run(&["check", model.to_str().unwrap(), "--json"]);
+    // The refutation marks P_pred refuted, which is a hard error, so the
+    // exit code is 1 — but the JSON report still shows the refutation sealed.
+    let json = parse_json(&stdout(&out)).unwrap();
+    let claims = json.get("claims").unwrap().as_arr().unwrap();
+    let refute = claims
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("R_pred"))
+        .unwrap();
+    assert_eq!(
+        refute.get("status").and_then(|v| v.as_str()),
+        Some("sealed")
+    );
+    assert_eq!(
+        refute.get("strength").and_then(|v| v.as_str()),
+        Some("observational")
+    );
+    let pred = claims
+        .iter()
+        .find(|c| c.get("name").and_then(|v| v.as_str()) == Some("P_pred"))
+        .unwrap();
+    assert_eq!(pred.get("status").and_then(|v| v.as_str()), Some("refuted"));
+    assert!(json
+        .get("errors")
+        .unwrap()
+        .as_arr()
+        .unwrap()
+        .iter()
+        .any(|e| e.as_str().unwrap_or("").contains("refuted by R_pred")));
+}
+
+#[test]
+fn refute_example_checks() {
+    let out = run(&["check", "examples/refute/model.dg"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("R_can_predict"), "{text}");
+    assert!(text.contains("observational"), "{text}");
+    // The contradiction comes from Observational external evidence, so the
+    // refutation is a recorded hypothesis, not a seal.
+    assert!(text.contains("hypothesis"), "{text}");
+    assert!(
+        text.contains("the contradiction is recorded but cannot seal"),
+        "{text}"
+    );
+}

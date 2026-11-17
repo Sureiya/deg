@@ -1,0 +1,9 @@
+DeG human decision record
+==========================
+
+Conflict : C_dec (version(3) vs version(4))
+Decision: prefer P_d (version(4)) over P_c (version(3))
+Signer  : conflict-auditor
+Date    : 2026-01-01
+
+Rationale: version(4) is the behavior observed on the reference server.
