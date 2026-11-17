@@ -1,0 +1,179 @@
+// DeG flagship example: a position reader, its packet, the RNG behind loot,
+// an observational trust-boundary claim, and a first-class refutation.
+//
+// Everything below is checked against examples/fixtures, which are synthetic
+// but content-addressed. Run:
+//   deg check examples/position/model.dg
+//   deg seal  examples/position/model.dg
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+capture c1 = capture("../fixtures/session-b1.pcap",
+  sha256: "c9c08a934058673ef36b22a5fb3cd793076ac5cd912018cfe2cc80e86f3abfc2",
+  build: b1);
+
+dataset ds_state = dataset("../fixtures/mt-state-b1.txt",
+  sha256: "c3067fc37ecc607918cd20b75ae0e7c061a7442e8b96529072c1c6394ec40a3a",
+  build: b1);
+
+dataset ds_obs = dataset("../fixtures/mt-observed-b1.txt",
+  sha256: "e7a25b93fe4fece78c109a813466254dc5efa010180cbef98cf64b2da8a56f58",
+  build: b1, from: c1);
+
+dataset ds_xs_state = dataset("../fixtures/xs-state.txt",
+  sha256: "7466bd28e4fe6efbebde95f7dd68ebc9fc4c45c31fb63f9b69c2e57b3757ce8e",
+  build: b1);
+
+clock srv_tick = server_clock(b1, hz: 64, epoch: match_start, monotone: true);
+
+struct Vec3 in b1 {
+  x: f32 @ 0;
+  y: f32 @ 4;
+  z: f32 @ 8;
+} size 12 align 4;
+
+packet S2C_Position in b1 {
+  opcode: u16 @ 0 = 0x1F4;
+  seq:    u32 @ 2;
+  pos:    Vec3 @ 6;
+  flags:  u8   @ 18;
+} size 19;
+
+fn read_position in b1 at 0x140001000;
+fn loot_roll     in b1 at 0x140001100;
+
+rng srv_rng in b1 at 0x140001200 {
+  algo: MT19937;
+  seed: from(time_seconds@boot);
+  scope: per_server_process;
+}
+
+dist LootTable in b1 {
+  rng: srv_rng;
+  site: loot_roll;
+  bins: 12;
+}
+
+// ── evidence ──────────────────────────────────────────────────────────────
+
+ev e_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 00 00") |> unique;
+ev e_shape  := decode(b1, read_position, count: 8);
+ev e_trace  := external("../fixtures/trace.json", kind: trace, build: b1);
+ev e_sym    := symbols(b1, "../fixtures/symbols-b1.json");
+
+ev e_mt_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 4D 00") |> unique;
+ev e_mt_consts := constants(b1, at: srv_rng, window: 64,
+  values: [0x9908B0DF, 0x9D2C5680, 0xEFC60000]) |> unique;
+ev e_recover := recovery(srv_rng, state: ds_state, index: 624, observed: ds_obs);
+ev e_xs_refute := recovery(srv_rng, algo: XORSHIFT128, state: ds_xs_state,
+  index: 0, observed: ds_obs);
+
+ev e_tick := rate(c1, opcode: 0x01F4, clock: srv_tick);
+ev e_loot := sample(c1, opcode: 0x02BC, field: 2, width: 2);
+ev e_absence := absence("../fixtures/absence.json", build: b1,
+  scope: ".text", during: c1);
+ev e_obs := external("../fixtures/observability.json", kind: observability, build: b1);
+
+ev e_loot_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 4C 00") |> unique;
+ev e_mod := modulo(b1, loot_roll, modulus: 12);
+
+// ── user rules ────────────────────────────────────────────────────────────
+
+// The standard library's modular_bias rule uses the same shape, but this rule
+// makes the LootTable → loot_roll → div chain explicit for the example.
+rule loot_biased:
+  biased(?d, ?m) if
+    dist_site(?d, ?f) and
+    fn_addr(?f, ?a) and
+    scan_hit(?e, ?a) and scan_unique(?e) and
+    modulo_op(?e2, ?f, ?m);
+
+// ── proofs ────────────────────────────────────────────────────────────────
+
+proof P_reads_vec3_z : reads(read_position, Vec3.z) in b1 {
+  evidence e_anchor, e_shape;
+  rules reader_reads_struct_field;
+}
+
+proof P_reads_packet_pos : reads(read_position, S2C_Position.pos) in b1 {
+  evidence e_trace;
+  rules packet_reader_traced;
+}
+
+proof P_anchor_exact : anchored(read_position) in b1 {
+  evidence e_sym;
+  rules exact_anchor;
+  expect >= exact;
+}
+
+proof P_layout_exact : layout_exact(Vec3) in b1 {
+  evidence e_sym;
+  rules exact_layout;
+  expect >= exact;
+}
+
+proof P_algo : algo(srv_rng, MT19937) in b1 {
+  evidence e_mt_anchor, e_mt_consts;
+  rules mt19937_identified;
+}
+
+proof P_recovered : recovered(srv_rng, 624, 64) in b1 {
+  evidence e_recover;
+  rules recovery_witness;
+}
+
+proof P_biased : biased(LootTable, 12) in b1 {
+  evidence e_loot_anchor, e_mod;
+  rules loot_biased;
+}
+
+proof P_absence : absent_field(S2C_Position.pos, ".text",
+  0x140001000, 0x140001400) in b1 {
+  evidence e_absence;
+  rules field_absent;
+}
+
+proof P_observable : outputs_observable(conn_7, c1) in b1 {
+  evidence e_obs;
+  rules observable_outputs;
+}
+
+// A simulation using the wrong algorithm is refuted by the MT outputs. The
+// evidence is a successful *observation* of a mismatch, not a failed proof.
+refute R_not_xorshift : algo(srv_rng, XORSHIFT128) in b1 by e_xs_refute;
+
+// ── statistical certificate claims ────────────────────────────────────────
+
+claim C_tick : period(srv_tick, stream: 0x01F4) ~ 15.625ms ± 0.05ms in b1
+  during c1 provisional until "2099-12-31"
+  by e_tick require coverage >= 60s, confidence >= 0.95;
+
+claim C_loot_uniform : uniform(LootTable, bins: 12) in b1 during c1
+  provisional until "2099-12-31"
+  by e_loot require alpha: 1e-4, power: 0.999, delta: 0.02, coverage >= 100s;
+
+// The code does `next() % 12`; 12k samples cannot resolve that bias. The
+// conflict is recorded and resolved in favor of the code-derived proof.
+conflict C_loot : C_loot_uniform vs P_biased
+  prefer P_biased
+  reason "modulo bias is provable from code; a 12k-sample histogram is underpowered by orders of magnitude";
+
+// ── composed security claims ──────────────────────────────────────────────
+
+claim C_tamperable : tamperable(Player.position) in b1
+  provisional until "2099-12-31"
+  from P_reads_packet_pos, P_absence, P_observable;
+
+claim C_predictable : predictable(srv_rng, conn_7, 32) in b1
+  provisional until "2099-12-31"
+  from P_algo, P_recovered, P_observable;
+
+// ── obligations ───────────────────────────────────────────────────────────
+
+// Automatically discharged because P_layout_exact proves the same atom.
+obligation O_layout : layout_exact(Vec3) priority: medium blocks: seal;
+
+// Deliberately left open: re-check the rate after the next capture.
+obligation O_recheck_rate : period_stable(srv_tick) priority: low;

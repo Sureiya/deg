@@ -1,0 +1,9 @@
+{
+  "kind": "observability",
+  "build": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  "tool": "deg-fixture 0.1",
+  "observability": {
+    "connection": "conn_7",
+    "window": "c1"
+  }
+}

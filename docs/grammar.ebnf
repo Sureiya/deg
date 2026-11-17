@@ -1,0 +1,180 @@
+; DeG surface grammar (v0.1)
+; This is the grammar implemented by src/parser.rs. Keywords are contextual
+; identifiers; the parser dispatches on the first identifier of a declaration.
+
+file            = { item } ;
+item            = pragma | build-decl | capture-decl | dump-decl
+                | dataset-decl | clock-decl | relate-decl
+                | struct-decl | packet-decl | fn-decl | rng-decl
+                | dist-decl | evidence-decl | rule-decl | proof-decl
+                | claim-decl | conflict-decl | obligation-decl
+                | refute-decl | port-decl ;
+
+pragma          = "pragma" ident "=" value ";" ;
+
+; ── artifacts ─────────────────────────────────────────────────────────────
+
+build-decl      = "build" ident "=" "binary" args ";" ;
+capture-decl    = "capture" ident "=" "capture" args ";" ;
+dump-decl       = "dump" ident "=" "dump" args ";" ;
+dataset-decl    = "dataset" ident "=" "dataset" args ";" ;
+
+; Named arguments used by the built-in declarations:
+;   build:    positional path;   sha256: hex64; arch: symbol;
+;             load: int; text: int ".." int
+;   capture:  positional path;   sha256: hex64; build: ref; filter: string
+;   dump:     positional path;   sha256: hex64; base: int; build: ref
+;   dataset:  positional path;   sha256: hex64; build: ref; from: ref
+
+args            = "(" [ arg { "," arg } ] ")" ;
+arg             = [ ident ":" ] arg-value ;
+arg-value       = value | int ".." int ;
+
+value           = int
+                | float
+                | string
+                | "true" | "false"
+                | ref
+                | list
+                | duration
+                | "LCG" args
+                | "-" ( int | float ) ;
+list            = "[" [ value { "," value } ] "]" ;
+ref             = ident { "." ident } ;
+duration        = ( int | float ) time-unit ;
+time-unit       = "us" | "ms" | "s" | "m" | "min" | "h" | "d" ;
+
+; ── clocks and relations ─────────────────────────────────────────────────
+
+clock-decl      = "clock" ident ( "=" | ":=" ) ident args ";" ;
+relate-decl     = "relate" ident ( "~" | "±" ) ident "within" duration ";" ;
+
+; Clock kinds are ordinary identifiers, e.g. server_clock, capture_clock.
+; Named args: hz: number, epoch: symbol, monotone: bool, build: ref.
+
+; ── model declarations ───────────────────────────────────────────────────
+
+struct-decl     = "struct" ident "in" ident "{" { field } "}"
+                  "size" int "align" int ";" ;
+packet-decl     = "packet" ident "in" ident "{" { field } "}"
+                  "size" int ";" ;
+field           = ident ":" type "@" int [ "=" int ] ";" ;
+type            = "u8" | "u16" | "u32" | "u64"
+                | "i8" | "i16" | "i32" | "i64"
+                | "f32" | "f64" | "bool" | "bytes"
+                | ident ;   (* named struct reference *)
+
+fn-decl         = "fn" ident "in" ident "at" int ";" ;
+
+rng-decl        = "rng" ident "in" ident "at" int "{"
+                    { rng-field }
+                  "}" ;
+rng-field       = "algo" ":" rng-algo ";"
+                | "seed" ":" raw-tokens ";"
+                | "scope" ":" raw-tokens ";" ;
+rng-algo        = "MT19937" | "XORSHIFT32" | "XORSHIFT128"
+                | "LCG" args
+                | ident ;
+
+dist-decl       = "dist" ident "in" ident "{"
+                    "rng" ":" ref ";"
+                    "site" ":" ref ";"
+                    "bins" ":" int ";"
+                  "}" ;
+
+; ── evidence ─────────────────────────────────────────────────────────────
+
+evidence-decl   = "ev" ident ":=" evidence-kind args { "|>" ident } ";" ;
+evidence-kind   = "scan" | "bytes" | "decode" | "constants" | "modulo"
+                | "recovery" | "rate" | "sample" | "external"
+                | "symbols" | "absence" ;
+
+; Kind-specific argument shapes:
+;   scan       positional build, section, pattern
+;   bytes      positional artifact; at: int; expect: string
+;   decode     positional build, fn; count: int
+;   constants  positional build; at: target; window: int; values: list
+;   modulo     positional build, fn; modulus: int
+;   recovery   positional rng; algo: name; state: dataset; index: int;
+;              observed: dataset; projection: name
+;   rate       positional capture; opcode: int; clock: ref
+;   sample     positional capture; opcode: int; field: int; width: int;
+;              endian: "be" | "le"
+;   external   positional path; kind: name; build: ref
+;   symbols    positional build, path
+;   absence    positional path; build: ref; scope: string; during: ref
+
+; ── rules ────────────────────────────────────────────────────────────────
+
+rule-decl       = "rule" ident [ "cap" strength ] ":"
+                    atom "if" atom { "and" atom } ";" ;
+atom            = ident "(" [ term { "," term } ] ")" ;
+term            = "?" ident | value ;
+strength        = "speculative" | "heuristic" | "observational"
+                | "deterministic" | "exact" ;
+
+; ── proofs ───────────────────────────────────────────────────────────────
+
+proof-decl      = "proof" ident ":" atom "in" ident "{"
+                    { proof-clause }
+                  "}" ;
+proof-clause    = "evidence" ident { "," ident } ";"
+                | "rules" ident { "," ident } ";"
+                | "expect" ">=" strength ";"
+                | "note" ( string | ident | int | float ) ";" ;
+
+; ── claims ───────────────────────────────────────────────────────────────
+
+claim-decl      = "claim" ident ":" claim-head "in" ident
+                    [ "during" ident ]
+                    [ "provisional" "until" ( string | ident ) ]
+                    claim-body ";" ;
+claim-head      = atom
+                | period-head
+                | uniform-head ;
+period-head     = ( "period" | "tick_rate" ) "(" ident ","
+                    "stream" ":" int ")" "~" duration "±" duration ;
+uniform-head    = "uniform" "(" ident "," "bins" ":" int ")" ;
+claim-body      = "by" ident [ "require" requirement { "," requirement } ]
+                | "from" ident { "," ident } ;
+requirement     = "coverage" ">=" duration
+                | ( "alpha" | "power" | "delta" ) ( ":" | "=" ) float
+                | "confidence" ">=" float
+                | "samples" ">=" int ;
+
+; ── conflicts, obligations, refutations, ports ───────────────────────────
+
+conflict-decl   = "conflict" ident ":" ident "vs" ident
+                    [ "prefer" ident ]
+                    [ "reason" string ]
+                    ";" ;
+
+obligation-decl = "obligation" ident ":" atom "priority" ":" priority
+                    [ "blocks" ":" "seal" ] ";"
+                | "obligation" ident "resolved" "by" ident ";" ;
+priority        = "low" | "medium" | "high" | "critical" ;
+
+refute-decl     = "refute" ident ":" atom "in" ident "by" ident ";" ;
+
+port-decl       = "port" "from" ident "to" ident "{"
+                    { port-rule }
+                  "}" ;
+port-rule       = "rebase" ident "by" "structural_similarity" "(" int ")"
+                    [ "min" float ] ";"
+                | "drop" ident ";"
+                | "revalidate" ident "with" ident ";" ;
+
+; ── lexical notes ────────────────────────────────────────────────────────
+
+; ident        ASCII letter or "_" followed by letters, digits, "_"
+; int          decimal, 0x…, or 0b…, with optional "_" separators
+; float        decimal, optional fraction and exponent (1e-4)
+; string       "…" with \n \r \t \\ \" \0 \xNN escapes
+; hex64        exactly 64 ASCII hex digits (checked after parsing)
+; pattern      whitespace-separated "F3 0F 10 ?? …"; ?? is a byte wildcard
+; comment      // to end of line, or /* … */
+; raw-tokens   token run consumed until ";" (seed/scope metadata)
+;
+; Unicode aliases accepted by the lexer:
+;   ±  = +-        ≈ = ~        ∧ = and       ⇒ = =>        ⊨ = |=
+;   ≤  = <=        ≥ = >=       → = ->        ∨ = or

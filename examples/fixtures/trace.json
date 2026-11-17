@@ -1,0 +1,10 @@
+{
+  "kind": "trace",
+  "build": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  "tool": "deg-fixture 0.1",
+  "note": "This certificate stands in for a dataflow tool. The kernel admits it only at Observational.",
+  "trace": {
+    "from": "S2C_Position.pos",
+    "to": "read_position"
+  }
+}

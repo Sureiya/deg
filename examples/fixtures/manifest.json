@@ -1,0 +1,16 @@
+{
+  "builds": {
+    "b1": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+    "b2": "6de12cc494343caf9e16bb05cba292b48d48b1b94f500588a4957ffa833f1f98"
+  },
+  "artifacts": {
+    "game-b1.bin": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+    "game-b2.bin": "6de12cc494343caf9e16bb05cba292b48d48b1b94f500588a4957ffa833f1f98",
+    "session-b1.pcap": "c9c08a934058673ef36b22a5fb3cd793076ac5cd912018cfe2cc80e86f3abfc2",
+    "mt-state-b1.txt": "c3067fc37ecc607918cd20b75ae0e7c061a7442e8b96529072c1c6394ec40a3a",
+    "mt-observed-b1.txt": "e7a25b93fe4fece78c109a813466254dc5efa010180cbef98cf64b2da8a56f58",
+    "mt-state-b2.txt": "2fc0fe3d276c7d1e1fd66ef5311a942a1dbc7d39c5e1e963b5aa224cc751b0f5",
+    "mt-observed-b2.txt": "7aa78ae60119e2fff24a78376cdb452771b099a166eedad8a2455c7785637a56",
+    "xs-state.txt": "7466bd28e4fe6efbebde95f7dd68ebc9fc4c45c31fb63f9b69c2e57b3757ce8e"
+  }
+}

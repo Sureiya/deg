@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test
+      - name: Checked examples
+        run: |
+          cargo run -q -- check examples/position/model.dg
+          cargo run -q -- check examples/timing/model.dg
+          cargo run -q -- check examples/rng/model.dg
+          cargo run -q -- check examples/loot/model.dg
+          cargo run -q -- port examples/port/model.dg --to b2 --json > /dev/null
+      - name: Seal example
+        run: cargo run -q -- seal examples/position/model.dg --out /tmp/deg-position.lock.json

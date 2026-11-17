@@ -1,0 +1,74 @@
+// Patch porting: the b1 reader moves, the MT constant changes, and the old RNG
+// witness no longer matches b2. `deg port` re-anchors what it can, structurally
+// rebases what is declared, and marks the rest stale with new obligations.
+//
+//   deg port examples/port/model.dg --to b2
+//
+// It never rewrites the model or silently keeps a claim.
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+build b2 = binary("../fixtures/game-b2.bin",
+  sha256: "6de12cc494343caf9e16bb05cba292b48d48b1b94f500588a4957ffa833f1f98",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+dataset ds_state = dataset("../fixtures/mt-state-b1.txt",
+  sha256: "c3067fc37ecc607918cd20b75ae0e7c061a7442e8b96529072c1c6394ec40a3a",
+  build: b1);
+
+dataset ds_obs_b1 = dataset("../fixtures/mt-observed-b1.txt",
+  sha256: "e7a25b93fe4fece78c109a813466254dc5efa010180cbef98cf64b2da8a56f58",
+  build: b1);
+
+dataset ds_obs_b2 = dataset("../fixtures/mt-observed-b2.txt",
+  sha256: "7aa78ae60119e2fff24a78376cdb452771b099a166eedad8a2455c7785637a56",
+  build: b2);
+
+struct Vec3 in b1 {
+  x: f32 @ 0;
+  y: f32 @ 4;
+  z: f32 @ 8;
+} size 12 align 4;
+
+fn read_position in b1 at 0x140001000;
+rng srv_rng in b1 at 0x140001200 {
+  algo: MT19937;
+  seed: from(time_seconds@boot);
+  scope: per_server_process;
+}
+
+ev e_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 00 00") |> unique;
+ev e_shape := decode(b1, read_position, count: 8);
+ev e_mt_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 4D 00") |> unique;
+ev e_mt_consts := constants(b1, at: srv_rng, window: 64,
+  values: [0x9908B0DF, 0x9D2C5680, 0xEFC60000]) |> unique;
+ev e_recover := recovery(srv_rng, state: ds_state, index: 624, observed: ds_obs_b1);
+
+proof P_reads : reads(read_position, Vec3.z) in b1 {
+  evidence e_anchor, e_shape;
+  rules reader_reads_struct_field;
+}
+
+proof P_algo : algo(srv_rng, MT19937) in b1 {
+  evidence e_mt_anchor, e_mt_consts;
+  rules mt19937_identified;
+}
+
+proof P_recovered : recovered(srv_rng, 624, 64) in b1 {
+  evidence e_recover;
+  rules recovery_witness;
+}
+
+port from b1 to b2 {
+  // The prologue magic changes in b2, so the b1 patterns disappear. The
+  // structural fallback produces a Heuristic re-anchor plus a uniqueness
+  // obligation; it never claims Deterministic.
+  rebase read_position by structural_similarity(48) min 0.55;
+  rebase srv_rng by structural_similarity(48) min 0.55;
+
+  // Re-simulating the old state against b2 outputs is expected to fail: that
+  // is a loud porting signal, not a silent carry-over.
+  revalidate e_recover with ds_obs_b2;
+}

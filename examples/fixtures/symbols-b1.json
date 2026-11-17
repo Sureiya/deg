@@ -1,0 +1,32 @@
+{
+  "build": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  "tool": "fixture-pdb 0.1",
+  "symbols": {
+    "read_position": "0x140001000",
+    "loot_roll": "0x140001100",
+    "mt_step": "0x140001200"
+  },
+  "types": {
+    "Vec3": {
+      "size": 12,
+      "align": 4,
+      "fields": [
+        {
+          "name": "x",
+          "type": "f32",
+          "offset": 0
+        },
+        {
+          "name": "y",
+          "type": "f32",
+          "offset": 4
+        },
+        {
+          "name": "z",
+          "type": "f32",
+          "offset": 8
+        }
+      ]
+    }
+  }
+}

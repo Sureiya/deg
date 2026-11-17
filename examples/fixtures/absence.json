@@ -1,0 +1,12 @@
+{
+  "kind": "absence",
+  "build": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  "tool": "mock-sound-analyzer 0.1",
+  "absence": {
+    "field": "S2C_Position.pos",
+    "scope": ".text",
+    "window_start_us": 0,
+    "window_end_us": 100000000,
+    "writes": []
+  }
+}

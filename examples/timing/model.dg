@@ -1,0 +1,28 @@
+// Timing: a statistical claim is checked against pcap timestamps, is capped at
+// Observational, and is sealed only provisionally.
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+capture c1 = capture("../fixtures/session-b1.pcap",
+  sha256: "c9c08a934058673ef36b22a5fb3cd793076ac5cd912018cfe2cc80e86f3abfc2",
+  build: b1);
+
+clock srv_tick = server_clock(b1, hz: 64, epoch: match_start, monotone: true);
+relate cli_frame ~ srv_tick within 50ms;
+
+ev e_tick := rate(c1, opcode: 0x01F4, clock: srv_tick);
+
+claim C_tick : period(srv_tick, stream: 0x01F4) ~ 15.625ms ± 0.05ms in b1
+  during c1 provisional until "2099-12-31"
+  by e_tick require coverage >= 60s, confidence >= 0.95;
+
+// What the kernel actually checked:
+//   - the capture is hashed and parsed (not a spreadsheet),
+//   - 6400 packets with the declared opcode exist,
+//   - the median inter-arrival is within the claimed tolerance,
+//   - the 95% CI is not wider than the claimed tolerance,
+//   - coverage >= 60 s,
+//   - a split-half stationarity check passed.
+// It cannot certify "64 Hz forever"; that is why the claim is provisional.

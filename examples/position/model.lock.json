@@ -1,0 +1,271 @@
+{
+  "artifact_count": 5,
+  "artifacts": [
+    {
+      "kind": "binary",
+      "name": "b1",
+      "path": "examples/fixtures/game-b1.bin",
+      "sha256": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+      "verified": true
+    },
+    {
+      "kind": "capture",
+      "name": "c1",
+      "path": "examples/fixtures/session-b1.pcap",
+      "sha256": "c9c08a934058673ef36b22a5fb3cd793076ac5cd912018cfe2cc80e86f3abfc2",
+      "verified": true
+    },
+    {
+      "kind": "dataset",
+      "name": "ds_obs",
+      "path": "examples/fixtures/mt-observed-b1.txt",
+      "sha256": "e7a25b93fe4fece78c109a813466254dc5efa010180cbef98cf64b2da8a56f58",
+      "verified": true
+    },
+    {
+      "kind": "dataset",
+      "name": "ds_state",
+      "path": "examples/fixtures/mt-state-b1.txt",
+      "sha256": "c3067fc37ecc607918cd20b75ae0e7c061a7442e8b96529072c1c6394ec40a3a",
+      "verified": true
+    },
+    {
+      "kind": "dataset",
+      "name": "ds_xs_state",
+      "path": "examples/fixtures/xs-state.txt",
+      "sha256": "7466bd28e4fe6efbebde95f7dd68ebc9fc4c45c31fb63f9b69c2e57b3757ce8e",
+      "verified": true
+    }
+  ],
+  "conflicts": [
+    {
+      "demoted": "C_loot_uniform",
+      "left": "C_loot_uniform",
+      "name": "C_loot",
+      "preferred": "P_biased",
+      "resolved": true,
+      "right": "P_biased"
+    }
+  ],
+  "definitions": [
+    {
+      "build": "b1",
+      "justified": false,
+      "kind": "dist",
+      "name": "LootTable"
+    },
+    {
+      "build": "b1",
+      "justified": false,
+      "kind": "fn",
+      "name": "loot_roll"
+    },
+    {
+      "build": "b1",
+      "justification": "P_anchor_exact",
+      "justified": true,
+      "kind": "fn",
+      "name": "read_position"
+    },
+    {
+      "build": "b1",
+      "justified": false,
+      "kind": "packet",
+      "name": "S2C_Position"
+    },
+    {
+      "build": "b1",
+      "justification": "P_algo",
+      "justified": true,
+      "kind": "rng",
+      "name": "srv_rng"
+    },
+    {
+      "build": "b1",
+      "justification": "P_layout_exact",
+      "justified": true,
+      "kind": "struct",
+      "name": "Vec3"
+    }
+  ],
+  "deg_version": "0.1.0",
+  "hypotheses": [
+    {
+      "goal": "uniform(LootTable, bins:12)",
+      "kind": "uniform",
+      "name": "C_loot_uniform",
+      "note": "demoted by conflict C_loot: modulo bias is provable from code; a 12k-sample histogram is underpowered by orders of magnitude",
+      "provisional_until": "2099-12-31",
+      "status": "hypothesis",
+      "strength": "observational",
+      "support": [
+        "e_loot"
+      ]
+    },
+    {
+      "goal": "predictable(srv_rng, conn_7, 32)",
+      "kind": "derived",
+      "name": "C_predictable",
+      "note": "at least one premise is only a hypothesis",
+      "provisional_until": "2099-12-31",
+      "status": "hypothesis",
+      "strength": "observational",
+      "support": [
+        "P_algo",
+        "P_observable",
+        "P_recovered"
+      ]
+    },
+    {
+      "goal": "tamperable(Player.position)",
+      "kind": "derived",
+      "name": "C_tamperable",
+      "note": "at least one premise is only a hypothesis",
+      "provisional_until": "2099-12-31",
+      "status": "hypothesis",
+      "strength": "observational",
+      "support": [
+        "P_absence",
+        "P_observable",
+        "P_reads_packet_pos"
+      ]
+    },
+    {
+      "goal": "absent_field(S2C_Position.pos, \".text\", 5368713216, 5368714240)",
+      "kind": "proof",
+      "name": "P_absence",
+      "note": "strength observational is below the seal threshold deterministic",
+      "status": "hypothesis",
+      "strength": "observational",
+      "support": [
+        "e_absence"
+      ]
+    },
+    {
+      "goal": "outputs_observable(conn_7, c1)",
+      "kind": "proof",
+      "name": "P_observable",
+      "note": "strength observational is below the seal threshold deterministic",
+      "status": "hypothesis",
+      "strength": "observational",
+      "support": [
+        "e_obs"
+      ]
+    },
+    {
+      "goal": "reads(read_position, S2C_Position.pos)",
+      "kind": "proof",
+      "name": "P_reads_packet_pos",
+      "note": "strength observational is below the seal threshold deterministic",
+      "status": "hypothesis",
+      "strength": "observational",
+      "support": [
+        "e_trace"
+      ]
+    }
+  ],
+  "model": "examples/position/model.dg",
+  "obligations": [
+    {
+      "blocks_seal": true,
+      "goal": "layout_exact(Vec3)",
+      "name": "O_layout",
+      "priority": "medium",
+      "resolved_by": "P_layout_exact",
+      "status": "resolved"
+    },
+    {
+      "blocks_seal": false,
+      "goal": "period_stable(srv_tick)",
+      "name": "O_recheck_rate",
+      "priority": "low",
+      "status": "open"
+    }
+  ],
+  "seal_threshold": "deterministic",
+  "sealed": [
+    {
+      "goal": "period(srv_tick, stream:0x01f4) ~ 15625us +- 50us",
+      "kind": "period",
+      "name": "C_tick",
+      "provisional_until": "2099-12-31",
+      "status": "provisional",
+      "strength": "observational",
+      "support": [
+        "e_tick"
+      ]
+    },
+    {
+      "goal": "algo(srv_rng, MT19937)",
+      "kind": "proof",
+      "name": "P_algo",
+      "status": "sealed",
+      "strength": "deterministic",
+      "support": [
+        "e_mt_consts"
+      ]
+    },
+    {
+      "goal": "anchored(read_position)",
+      "kind": "proof",
+      "name": "P_anchor_exact",
+      "status": "sealed",
+      "strength": "exact",
+      "support": [
+        "e_sym"
+      ]
+    },
+    {
+      "goal": "biased(LootTable, 12)",
+      "kind": "proof",
+      "name": "P_biased",
+      "status": "sealed",
+      "strength": "deterministic",
+      "support": [
+        "e_loot_anchor",
+        "e_mod"
+      ]
+    },
+    {
+      "goal": "layout_exact(Vec3)",
+      "kind": "proof",
+      "name": "P_layout_exact",
+      "status": "sealed",
+      "strength": "exact",
+      "support": [
+        "e_sym"
+      ]
+    },
+    {
+      "goal": "reads(read_position, Vec3.z)",
+      "kind": "proof",
+      "name": "P_reads_vec3_z",
+      "status": "sealed",
+      "strength": "deterministic",
+      "support": [
+        "e_anchor",
+        "e_shape"
+      ]
+    },
+    {
+      "goal": "recovered(srv_rng, 624, 64)",
+      "kind": "proof",
+      "name": "P_recovered",
+      "status": "sealed",
+      "strength": "deterministic",
+      "support": [
+        "e_recover"
+      ]
+    },
+    {
+      "goal": "algo(srv_rng, XORSHIFT128)",
+      "kind": "refutation",
+      "name": "R_not_xorshift",
+      "status": "sealed",
+      "strength": "deterministic",
+      "support": [
+        "e_xs_refute"
+      ]
+    }
+  ]
+}

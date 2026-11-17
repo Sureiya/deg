@@ -1,0 +1,26 @@
+[package]
+name = "deg"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "DeG: a Datalog-with-certificates proof language and checker for game client/server reverse engineering"
+license = "MIT"
+repository = "https://github.com/Sureiya/deg"
+readme = "README.md"
+keywords = ["reverse-engineering", "proof-language", "datalog", "game-security"]
+categories = ["development-tools", "parsing"]
+
+[[bin]]
+name = "deg"
+path = "src/main.rs"
+
+[lib]
+name = "deg"
+path = "src/lib.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[dependencies]

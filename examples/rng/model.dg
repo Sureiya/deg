@@ -1,0 +1,62 @@
+// RNG: algorithm identification from constants, an algebraic-recovery witness
+// re-checked by forward simulation, and a refutation of a competing algorithm.
+
+build b1 = binary("../fixtures/game-b1.bin",
+  sha256: "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+  arch: x86_64, load: 0x140000000, text: 0x140001000..0x140001400);
+
+capture c1 = capture("../fixtures/session-b1.pcap",
+  sha256: "c9c08a934058673ef36b22a5fb3cd793076ac5cd912018cfe2cc80e86f3abfc2",
+  build: b1);
+
+dataset ds_state = dataset("../fixtures/mt-state-b1.txt",
+  sha256: "c3067fc37ecc607918cd20b75ae0e7c061a7442e8b96529072c1c6394ec40a3a",
+  build: b1);
+
+dataset ds_obs = dataset("../fixtures/mt-observed-b1.txt",
+  sha256: "e7a25b93fe4fece78c109a813466254dc5efa010180cbef98cf64b2da8a56f58",
+  build: b1, from: c1);
+
+dataset ds_xs_state = dataset("../fixtures/xs-state.txt",
+  sha256: "7466bd28e4fe6efbebde95f7dd68ebc9fc4c45c31fb63f9b69c2e57b3757ce8e",
+  build: b1);
+
+rng srv_rng in b1 at 0x140001200 {
+  algo: MT19937;
+  seed: from(time_seconds@boot);
+  scope: per_server_process;
+}
+
+ev e_mt_anchor := scan(b1, ".text", "48 B8 44 65 47 21 62 31 4D 00") |> unique;
+ev e_mt_consts := constants(b1, at: srv_rng, window: 64,
+  values: [0x9908B0DF, 0x9D2C5680, 0xEFC60000]) |> unique;
+ev e_recover := recovery(srv_rng, state: ds_state, index: 624, observed: ds_obs);
+ev e_xs_refute := recovery(srv_rng, algo: XORSHIFT128, state: ds_xs_state,
+  index: 0, observed: ds_obs);
+ev e_obs := external("../fixtures/observability.json", kind: observability, build: b1);
+
+proof P_algo : algo(srv_rng, MT19937) in b1 {
+  evidence e_mt_anchor, e_mt_consts;
+  rules mt19937_identified;
+}
+
+// The witness is the 624-word state at index 624; the kernel runs MT19937
+// forward and compares 64 outputs against the hashed dataset. The *solver* is
+// outside the kernel; the *certificate* is the forward simulation.
+proof P_recovered : recovered(srv_rng, 624, 64) in b1 {
+  evidence e_recover;
+  rules recovery_witness;
+}
+
+proof P_observable : outputs_observable(conn_7, c1) in b1 {
+  evidence e_obs;
+  rules observable_outputs;
+}
+
+refute R_not_xorshift : algo(srv_rng, XORSHIFT128) in b1 by e_xs_refute;
+
+// The composed claim inherits its weakest conjunct. The algorithm and state are
+// Deterministic, but observability is an external, time-scoped certificate, so
+// the honest result is Observational and the bottleneck is named.
+claim C_predictable : predictable(srv_rng, conn_7, 32) in b1
+  from P_algo, P_recovered, P_observable;
