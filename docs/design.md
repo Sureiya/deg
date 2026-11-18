@@ -395,7 +395,9 @@ The kernel:
 
 There is no proof search outside the named rules. A proof that cannot derive the
 goal fails with the available facts of that relation, so the researcher can see
-what premise was missing.
+what premise was missing. `deg explain <model> <claim>` prints the derivation
+tree as text; `--mermaid` renders the same tree as a GitHub-ready Mermaid
+flowchart with the strengths and origins on every node and edge.
 
 Optional `expect >= exact;` turns “I expect this to be exact” into a hard check.
 A proof whose strength is below the seal threshold becomes a **hypothesis**,
@@ -841,7 +843,9 @@ Semantics:
 
 `port` is a report, not a mutating compiler, in v0.1. That is a deliberate
 safety choice: an automated rewrite of a security claim is exactly where a tool
-should be conservative.
+should be conservative. `deg port … --markdown` renders the report as
+GitHub-ready Markdown (mappings and claims tables); `--json` remains available
+for machines.
 
 ## 15. Deliberate omissions
 

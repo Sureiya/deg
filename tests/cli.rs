@@ -220,6 +220,85 @@ fn explain_prints_the_derivation() {
 }
 
 #[test]
+fn explain_mermaid_prints_a_flowchart() {
+    let out = run(&[
+        "explain",
+        "examples/position/model.dg",
+        "P_reads_vec3_z",
+        "--mermaid",
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("```mermaid"), "{text}");
+    assert!(text.contains("flowchart TD"), "{text}");
+    assert!(
+        text.contains(
+            "reads(read_position, Vec3.z)<br/>deterministic<br/>rule reader_reads_struct_field"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("-->|evidence e_anchor|"), "{text}");
+    assert!(text.contains("-->|definition|"), "{text}");
+}
+
+#[test]
+fn explain_mermaid_and_json_are_mutually_exclusive() {
+    let out = run(&[
+        "explain",
+        "examples/position/model.dg",
+        "P_reads_vec3_z",
+        "--mermaid",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("mutually exclusive"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn port_markdown_renders_the_report() {
+    let out = run(&["port", "examples/port/model.dg", "--to", "b2", "--markdown"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(
+        text.contains("# DeG port report — `examples/port/model.dg` → `b2`"),
+        "{text}"
+    );
+    assert!(text.contains("## Mappings"), "{text}");
+    assert!(text.contains("## Claims"), "{text}");
+    assert!(text.contains("## New obligations"), "{text}");
+    assert!(text.contains("## Warnings"), "{text}");
+    assert!(
+        text.contains(
+            "| `P_reads` | `b1` | rebased | demoted | deterministic → heuristic | ported strength heuristic is below the seal threshold deterministic; re-discharge obligations |"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("[blocks seal]"), "{text}");
+}
+
+#[test]
+fn port_markdown_and_json_are_mutually_exclusive() {
+    let out = run(&[
+        "port",
+        "examples/port/model.dg",
+        "--to",
+        "b2",
+        "--markdown",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("mutually exclusive"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
 fn json_check_output_parses() {
     let out = run(&["check", "examples/position/model.dg", "--json"]);
     assert!(out.status.success());

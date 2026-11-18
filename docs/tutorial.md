@@ -161,6 +161,9 @@ evidence:
 The definition facts are visible in the derivation but do not appear in the
 support set. That is deliberate: a proof cannot seal on definitions alone.
 
+`deg explain … --mermaid` renders the same derivation as a GitHub-ready
+Mermaid flowchart instead of text.
+
 ## 4. How strength is assigned
 
 Read the table in the [design](../docs/design.md#5-evidence).
@@ -297,6 +300,10 @@ reader proof is re-derived at Heuristic, not silently kept at Deterministic.
 The changed constant makes the algorithm proof stale, and the old state run
 against the new observed stream fails. The report tells you exactly what to
 re-earn before sealing b2.
+
+`deg port … --markdown` renders the same report as GitHub-ready Markdown
+(mappings and claims tables, obligations, warnings) instead of plain text;
+`--json` stays available for machines.
 
 ## 10. Writing your own model
 
