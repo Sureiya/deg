@@ -20,15 +20,21 @@ Usage:
   deg check <model.dg> [--artifacts DIR] [--json] [--strict]
   deg seal  <model.dg> [--artifacts DIR] [--out FILE] [--strict]
   deg report <model.dg> [--artifacts DIR] [--json]
-  deg explain <model.dg> <claim> [--artifacts DIR]
+  deg explain <model.dg> <claim> [--artifacts DIR] [--mermaid]
   deg artifacts <model.dg> [--artifacts DIR] [--json]
-  deg port <model.dg> --to <build> [--artifacts DIR] [--json]
+  deg port <model.dg> --to <build> [--artifacts DIR] [--json | --markdown]
   deg extensions
   deg stdlib
   deg version
 
 `deg extensions` prints the evidence kinds compiled into this binary, one per
 line (the core binary registers none; domain builds may add their own).
+
+`deg explain --mermaid` prints the derivation as a GitHub-renderable Mermaid
+flowchart; `--mermaid` and `--json` are mutually exclusive.
+
+`deg port --markdown` prints the port report as GitHub-ready Markdown instead
+of plain text; `--markdown` and `--json` are mutually exclusive.
 
 Exit codes: 0 ok, 1 check/seal failures, 2 usage or parse error.
 "#;
@@ -41,6 +47,8 @@ struct Opts {
     out: Option<PathBuf>,
     to: Option<String>,
     extra: Option<String>,
+    mermaid: bool,
+    markdown: bool,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
@@ -52,6 +60,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
         out: None,
         to: None,
         extra: None,
+        mermaid: false,
+        markdown: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -65,6 +75,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, String> {
             }
             "--json" => o.json = true,
             "--strict" => o.strict = true,
+            "--mermaid" => o.mermaid = true,
+            "--markdown" => o.markdown = true,
             "--out" => {
                 i += 1;
                 o.out = Some(PathBuf::from(args.get(i).ok_or("--out needs a file")?));
@@ -261,7 +273,18 @@ pub fn run() -> ExitCode {
                 eprintln!("deg: explain needs a claim name\n\n{USAGE}");
                 return ExitCode::from(2);
             };
-            report::explain(&report, &claim);
+            if opts.mermaid && opts.json {
+                eprintln!("deg: --mermaid and --json are mutually exclusive\n\n{USAGE}");
+                return ExitCode::from(2);
+            }
+            if opts.mermaid {
+                match report::mermaid(&report, &claim) {
+                    Some(m) => print!("{m}"),
+                    None => eprintln!("no claim named `{claim}`"),
+                }
+            } else {
+                report::explain(&report, &claim);
+            }
             ExitCode::SUCCESS
         }
         "artifacts" => {
@@ -293,9 +316,15 @@ pub fn run() -> ExitCode {
                 eprintln!("deg: port needs --to <build>\n\n{USAGE}");
                 return ExitCode::from(2);
             };
-            let port_report = crate::port::port(&index, &artifacts, &to);
+            if opts.json && opts.markdown {
+                eprintln!("deg: --json and --markdown are mutually exclusive\n\n{USAGE}");
+                return ExitCode::from(2);
+            }
+            let port_report = crate::port::port(&index, &artifacts, &to, &report);
             if opts.json {
                 println!("{}", crate::port::port_json(&port_report));
+            } else if opts.markdown {
+                print!("{}", crate::port::port_markdown(&port_report, &model_path));
             } else {
                 crate::port::print_port(&port_report);
             }

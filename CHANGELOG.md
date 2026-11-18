@@ -18,7 +18,8 @@ Initial working prototype.
   provisional sealing, conflicts with explicit preference, composed claims with
   bottleneck reporting.
 - Tooling: `check`, `seal`, `report`, `explain`, `artifacts`, `port`, `stdlib`,
-  JSON output, Markdown reports, deterministic lock files.
+  JSON output, Markdown reports, deterministic lock files, Mermaid derivations
+  (`explain --mermaid`), Markdown port reports (`port --markdown`).
 - Examples and deterministic fixtures for position/packet, timing, RNG, loot
   conflict, and patch porting. End-to-end tests for the checked examples and
   negative cases.

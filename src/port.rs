@@ -12,7 +12,7 @@ use crate::ast::*;
 use crate::evidence::{self, EvalCtx, EvidenceOutcome};
 use crate::facts::{self, FactStore};
 use crate::json::Json;
-use crate::kernel::{self, ClaimKind, ClaimResult, ClaimStatus};
+use crate::kernel::{self, CheckReport, ClaimKind, ClaimResult, ClaimStatus};
 use crate::semantic::ModelIndex;
 use crate::strength::Strength;
 use crate::value::{Lit, Value};
@@ -60,7 +60,29 @@ pub struct PortReport {
     pub errors: Vec<String>,
 }
 
-pub fn port(index: &ModelIndex, artifacts: &ArtifactSet, target: &str) -> PortReport {
+/// Port every claim from other builds to `target`. `source` is the check
+/// report of the model itself, which provides each claim's strength in its
+/// source build (the "old" half of the report's old → new strength column).
+pub fn port(
+    index: &ModelIndex,
+    artifacts: &ArtifactSet,
+    target: &str,
+    source: &CheckReport,
+) -> PortReport {
+    let old_strengths: BTreeMap<&str, Option<Strength>> = source
+        .claims
+        .iter()
+        .map(|c| (c.name.as_str(), c.strength))
+        .collect();
+    port_inner(index, artifacts, target, &old_strengths)
+}
+
+fn port_inner(
+    index: &ModelIndex,
+    artifacts: &ArtifactSet,
+    target: &str,
+    old_strengths: &BTreeMap<&str, Option<Strength>>,
+) -> PortReport {
     let mut report = PortReport {
         target: target.to_string(),
         mappings: Vec::new(),
@@ -209,7 +231,7 @@ pub fn port(index: &ModelIndex, artifacts: &ArtifactSet, target: &str) -> PortRe
             source_build: proof.build.clone(),
             action: result.0.clone(),
             status: result.1.clone(),
-            old_strength: None,
+            old_strength: old_strengths.get(proof.name.as_str()).copied().flatten(),
             new_strength: result.2,
             note: result.3.clone(),
         });
@@ -256,7 +278,7 @@ pub fn port(index: &ModelIndex, artifacts: &ArtifactSet, target: &str) -> PortRe
             source_build: claim.build.clone(),
             action: "stale".into(),
             status: status.into(),
-            old_strength: None,
+            old_strength: old_strengths.get(claim.name.as_str()).copied().flatten(),
             new_strength: None,
             note: Some(note.clone()),
         });
@@ -331,7 +353,7 @@ pub fn port(index: &ModelIndex, artifacts: &ArtifactSet, target: &str) -> PortRe
                     source_build: claim.build.clone(),
                     action: status.into(),
                     status: status.into(),
-                    old_strength: None,
+                    old_strength: old_strengths.get(claim.name.as_str()).copied().flatten(),
                     new_strength: result.strength,
                     note: result.note.clone().or(result.error.clone()),
                 });
@@ -1202,6 +1224,74 @@ pub fn print_port(report: &PortReport) {
             println!("  ✗ {e}");
         }
     }
+}
+
+/// Render the port report as a GitHub-ready Markdown document. The report
+/// structures are already in deterministic order, so the tables are stable.
+pub fn port_markdown(report: &PortReport, model: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "# DeG port report — `{model}` → `{}`\n\n",
+        report.target
+    ));
+
+    out.push_str("## Mappings\n\n| Kind | Name | Old | New | Similarity | How |\n|---|---|---|---|---|---|\n");
+    for m in &report.mappings {
+        out.push_str(&format!(
+            "| {} | `{}` | `{:#x}` | `{:#x}` | {:.2} | {} |\n",
+            m.kind, m.name, m.old_addr, m.new_addr, m.similarity, m.how
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("## Claims\n\n| Claim | Source build | Action | Status | Strength | Notes |\n|---|---|---|---|---|---|\n");
+    for c in &report.claims {
+        let strength = match (c.old_strength, c.new_strength) {
+            (Some(o), Some(n)) => format!("{} → {}", o.as_str(), n.as_str()),
+            (Some(o), None) => o.as_str().to_string(),
+            (None, Some(n)) => n.as_str().to_string(),
+            (None, None) => "-".into(),
+        };
+        let note = c.note.as_deref().unwrap_or("").replace('|', "\\|");
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | {} | {} | {} |\n",
+            c.name, c.source_build, c.action, c.status, strength, note
+        ));
+    }
+    out.push('\n');
+
+    out.push_str("## New obligations\n\n");
+    if report.obligations.is_empty() {
+        out.push_str("_None._\n\n");
+    } else {
+        for o in &report.obligations {
+            out.push_str(&format!(
+                "- `{}` — `{}` ({}){}\n",
+                o.name,
+                o.goal,
+                o.reason.replace('|', "\\|"),
+                if o.blocks_seal { " [blocks seal]" } else { "" }
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !report.warnings.is_empty() {
+        out.push_str("## Warnings\n\n");
+        for w in &report.warnings {
+            out.push_str(&format!("- {w}\n"));
+        }
+        out.push('\n');
+    }
+    if !report.errors.is_empty() {
+        out.push_str("## Errors\n\n");
+        for e in &report.errors {
+            out.push_str(&format!("- {e}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str("---\n\n_Generated by DeG. Strength is computed, never asserted._\n");
+    out
 }
 
 pub fn port_json(report: &PortReport) -> Json {

@@ -133,10 +133,191 @@ model definitions has no evidence support and cannot seal.
 └──────────────────────────────────────────────────────────────┘
 ```
 
+The same four layers, with the strength lattice that binds them:
+
+```mermaid
+flowchart TD
+    ART["ARTIFACTS<br/>binaries · pcaps · dumps · datasets<br/>content-addressed, SHA-256 pinned"]
+    EVI["EVIDENCE<br/>scan · bytes · decode · constants · modulo<br/>simulation · rate · sample · certificates<br/>replayed by the kernel, never trusted from a script"]
+    FAC["FACTS + RULES<br/>ground atoms · maximin strength · provenance<br/>strength is computed, never asserted"]
+    CLA["CLAIMS / SEAL<br/>relational proofs · certificate claims · derived claims<br/>conflicts · refutes · obligations<br/>seal refused below the model threshold"]
+    ART --> EVI --> FAC --> CLA
+    LAT["STRENGTH LATTICE<br/>speculative → heuristic → observational → deterministic → exact"]
+    FAC -.->|"every derivation step"| LAT
+```
+
+And the lifecycle of one claim:
+
+```mermaid
+flowchart LR
+    CHECK["deg check<br/>replay evidence · apply the named rules"] --> STATE{"status"}
+    STATE -->|"strength ≥ threshold"| SEALED["sealed ✓"]
+    STATE -->|"time-boxed"| PROV["provisional ◐"]
+    STATE -->|"below threshold"| HYP["hypothesis ?"]
+    STATE -->|"witness contradicts"| REFUTED["refuted ✗"]
+    SEALED --> LOCK["deg seal → model.lock.json"]
+    PROV --> LOCK
+    HYP --> OPEN["recorded hypotheses<br/>+ open obligations"]
+    OPEN --> LOCK
+    CONFLICT["conflicting claims"] --> DECISION{"decision<br/>prefer or hash-pinned decision file"}
+    DECISION -->|"demote the weaker claim"| HYP
+    LOCK --> PORT["deg port → re-anchor · rebase · stale"]
+    PORT --> OBL["new obligations<br/>[blocks seal]"]
+    OBL --> OPEN
+```
+
 The trusted kernel is `src/{artifact,evidence,facts,kernel,prng,stats,x86,pcap}`.
 Rules are visible in `deg stdlib` and are part of the trusted spec; proofs only
 apply the rules they name. Model definitions (layouts, function addresses, RNG
 sites) are *assumptions*, audited in the report, not secret axioms.
+
+## See it work
+
+Everything below is the verbatim output of the binary in this repository
+(`cargo build --release && ./target/release/deg …`), not edited by hand.
+Elisions are marked with `…` or `...` and nothing else is touched.
+
+### Check a model
+
+```console
+$ deg check examples/position/model.dg
+deg check examples/position/model.dg
+  artifacts   5 (5 verified)
+  evidence    14 (14 ok)
+  claims      7 sealed, 1 provisional, 6 hypothesis, 0 failed/refuted
+  obligations 1 open
+  conflicts   1 (0 unresolved)
+  decisions   0 (0 ok)
+  threshold   deterministic
+
+claims:
+  ? C_loot_uniform               hypothesis   observational  uniform(LootTable, bins:12)
+      note: demoted by conflict C_loot: modulo bias is provable from code; a 12k-sample histogram is underpowered…
+  ? C_predictable                hypothesis   observational  predictable(srv_rng, conn_7, 32)
+      note: at least one premise is only a hypothesis
+      bottleneck: P_observable
+  ? C_tamperable                 hypothesis   observational  tamperable(Player.position)
+      note: at least one premise is only a hypothesis
+      bottleneck: P_reads_packet_pos
+  ◐ C_tick                       provisional  observational  period(srv_tick, stream:0x01f4) ~ 15625us +- 50us
+      note: provisional until 2099-12-31
+  ? P_absence                    hypothesis   observational  absent_field(S2C_Position.pos, ".text", 5368713216, 5368714240)
+      note: strength observational is below the seal threshold deterministic
+  ✓ P_algo                       sealed       deterministic  algo(srv_rng, MT19937)
+  ✓ P_anchor_exact               sealed       exact          anchored(read_position)
+  ✓ P_biased                     sealed       deterministic  biased(LootTable, 12)
+  ✓ P_layout_exact               sealed       exact          layout_exact(Vec3)
+...
+```
+
+The `…` on the C_loot note marks where that long note was trimmed; the `...`
+line marks where the rest of the claims list was cut.
+
+### Explain a claim — the derivation as a Mermaid flowchart
+
+````console
+$ deg explain examples/position/model.dg P_reads_vec3_z --mermaid
+```mermaid
+flowchart TD
+    n0["reads(read_position, Vec3.z)<br/>deterministic<br/>rule reader_reads_struct_field"]
+    n1["field_offset(Vec3.z, 8)<br/>exact"]
+    n0 -->|definition| n1
+    n2["field_owner(Vec3.z, Vec3)<br/>exact"]
+    n0 -->|definition| n2
+    n3["fn_addr(read_position, 5368713216)<br/>exact"]
+    n0 -->|definition| n3
+    n4["loads_set(e_shape, read_position, [0, 4, 8], 4)<br/>deterministic"]
+    n0 -->|evidence e_shape| n4
+    n5["owner_kind(Vec3, struct)<br/>exact"]
+    n0 -->|definition| n5
+    n6["scan_hit(e_anchor, 5368713216)<br/>deterministic"]
+    n0 -->|evidence e_anchor| n6
+    n7["scan_unique(e_anchor)<br/>deterministic"]
+    n0 -->|evidence e_anchor| n7
+```
+````
+
+The rule that derives the goal is on the goal node; every edge is labeled with
+what its premise is — a model definition, or evidence the kernel replayed.
+
+### Seal — a reproducible lock
+
+```console
+$ deg seal examples/position/model.dg --out /tmp/show.lock.json
+sealed 7 claim(s) (1 provisional) into /tmp/show.lock.json
+recorded 6 hypothesis/hypotheses: C_loot_uniform, C_predictable, C_tamperable, P_absence, P_observable, P_reads_packet_pos
+open obligations recorded: O_recheck_rate
+```
+
+The lock is deterministic JSON with sorted keys. Excerpt — one artifact entry
+and the sealed/recorded names, everything in between elided:
+
+```json
+{
+  "artifact_count": 5,
+  "artifacts": [
+    {
+      "kind": "binary",
+      "name": "b1",
+      "path": "examples/fixtures/game-b1.bin",
+      "sha256": "470de64c4b572ec064a0e14e1831017dea5c6204f24383f0bc31b9cd474beca6",
+      "verified": true
+    },
+    … 4 more artifact entries …
+  ],
+  … conflicts / decisions / definitions elided …
+  "deg_version": "0.1.0",
+  "hypotheses": [ "C_loot_uniform", "C_predictable", "C_tamperable", "P_absence", "P_observable", "P_reads_packet_pos" ],
+  "model": "examples/position/model.dg",
+  "obligations": [ "O_layout", "O_recheck_rate" ],
+  "seal_threshold": "deterministic",
+  "sealed": [ "C_tick", "P_algo", "P_anchor_exact", "P_biased", "P_layout_exact", "P_reads_vec3_z", "P_recovered", "R_not_xorshift" ]
+}
+```
+
+### Port across a patch — an honest report, not a silent keep
+
+```console
+$ deg port examples/port/model.dg --to b2 --markdown
+# DeG port report — `examples/port/model.dg` → `b2`
+
+## Mappings
+
+| Kind | Name | Old | New | Similarity | How |
+|---|---|---|---|---|---|
+| fn | `read_position` | `0x140001000` | `0x140001080` | 0.98 | structural_similarity |
+| rng | `srv_rng` | `0x140001200` | `0x140001280` | 0.96 | structural_similarity |
+
+## Claims
+
+| Claim | Source build | Action | Status | Strength | Notes |
+|---|---|---|---|---|---|
+| `P_algo` | `b1` | stale | stale | deterministic | stale: `e_mt_consts`: constant 0xefc60000 missing in the target window |
+| `P_reads` | `b1` | rebased | demoted | deterministic → heuristic | ported strength heuristic is below the seal threshold deterministic; re-discharge obligations |
+| `P_recovered` | `b1` | failed | failed | deterministic | could not re-derive recovered(srv_rng, 624, 64) against b2; re-anchor or re-validate |
+
+… the new-obligation and warning sections follow …
+```
+
+The reader proof is re-anchored by structural similarity, so it is *demoted*
+from `deterministic` to `heuristic` — the port never silently keeps a claim.
+
+### The rest of the surface
+
+```console
+deg report examples/position/model.dg   # full Markdown audit — see docs/tutorial.md §10
+deg stdlib                              # the rule library the proofs draw from
+deg extensions                          # compiled-in evidence kinds (none in the core binary)
+```
+
+## Why DeG
+
+Claims about a game binary rot at every patch: the offsets move, the opcodes
+change, the seed source disappears. DeG binds each claim to hashed artifacts
+and computes its strength from evidence the kernel replays, never from
+asserted confidence. A seal is a reproducible lock — re-run the check and you
+get the same strengths, or a loud failure. A port report says exactly which
+claim broke, why, and what must be re-earned before the new build can seal.
 
 ## Repository layout
 
