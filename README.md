@@ -305,7 +305,7 @@ from `deterministic` to `heuristic` — the port never silently keeps a claim.
 ### The rest of the surface
 
 ```console
-deg report examples/position/model.dg   # full Markdown audit — see docs/tutorial.md §10
+deg report examples/position/model.dg   # full Markdown audit — see docs/tutorial.md
 deg stdlib                              # the rule library the proofs draw from
 deg extensions                          # compiled-in evidence kinds (none in the core binary)
 ```

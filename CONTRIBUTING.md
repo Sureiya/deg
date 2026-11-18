@@ -24,6 +24,9 @@ If you regenerate, update the `sha256:` fields in every model that references
 the changed files. The kernel is supposed to reject stale digests; do not
 “fix” that by relaxing the check.
 
+README excerpts are verified by `python3 tools/verify_readme.py`: it re-runs
+the documented commands against the built binary and fails on any drift.
+
 ## What makes a good change
 
 - **A kernel primitive should re-check something.** If the kernel cannot
